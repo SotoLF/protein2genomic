@@ -1,0 +1,7 @@
+/mnt/d/Boston_2025/tfregdb2/protein2genomic/build/CMakeFiles/protein2genomic.dir
+/mnt/d/Boston_2025/tfregdb2/protein2genomic/build/CMakeFiles/edit_cache.dir
+/mnt/d/Boston_2025/tfregdb2/protein2genomic/build/CMakeFiles/rebuild_cache.dir
+/mnt/d/Boston_2025/tfregdb2/protein2genomic/build/CMakeFiles/list_install_components.dir
+/mnt/d/Boston_2025/tfregdb2/protein2genomic/build/CMakeFiles/install.dir
+/mnt/d/Boston_2025/tfregdb2/protein2genomic/build/CMakeFiles/install/local.dir
+/mnt/d/Boston_2025/tfregdb2/protein2genomic/build/CMakeFiles/install/strip.dir
