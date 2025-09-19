@@ -47,23 +47,14 @@ struct GenomicInterval {
 struct GeneStructure {
     std::string gene_id;
     std::string chromosome;
-    uint32_t gene_start;
-    uint32_t gene_end;
     char strand;
-    std::vector<GenomicInterval> exons;
-    std::vector<GenomicInterval> cds_regions;
-    uint32_t cds_start;  // First CDS start
-    uint32_t cds_end;    // Last CDS end
+    std::vector<GenomicInterval> cds_regions;  // Only store CDS for intron generation
     std::string protein_id;
     
-    // Additional feature containers (only used features)
-    std::vector<GenomicInterval> introns;
-    
-    GeneStructure() : gene_start(0), gene_end(0), strand('+'), cds_start(0), cds_end(0) {}
+    GeneStructure() : strand('+') {}
     
     // Generate derived features
     std::vector<GenomicInterval> get_introns() const;
-    std::vector<GenomicInterval> get_all_features(FeatureType requested_types) const;
 };
 
 

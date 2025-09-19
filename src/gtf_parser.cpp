@@ -169,6 +169,19 @@ void GTFParser::process_record(const GTFRecord& record) {
         return;
     }
     
+    // Normalize IDs by removing version numbers for compatibility between GENCODE/Ensembl
+    auto remove_version = [](const std::string& id) -> std::string {
+        size_t dot_pos = id.find('.');
+        return (dot_pos != std::string::npos) ? id.substr(0, dot_pos) : id;
+    };
+    
+    // Normalize all IDs
+    gene_id = remove_version(gene_id);
+    transcript_id = remove_version(transcript_id);
+    if (!protein_id.empty()) {
+        protein_id = remove_version(protein_id);
+    }
+    
     // Create genomic interval
     GenomicInterval interval(
         record.chromosome,
@@ -184,8 +197,9 @@ void GTFParser::process_record(const GTFRecord& record) {
     // Store in temp_transcript_data_ for later processing
     temp_transcript_data_[transcript_id].push_back(interval);
     
-    // If this record has protein_id, store the protein -> transcript mapping
+    // Handle protein_id mapping
     if (!protein_id.empty()) {
+        // Direct protein_id present (works for both GENCODE and Ensembl)
         protein_to_transcript_[protein_id] = transcript_id;
         
         // For CDS features with protein_id, also add directly to protein_index_ (fallback)
@@ -210,12 +224,26 @@ bool GTFParser::is_relevant_feature(const std::string& feature) const {
 }
 
 const std::vector<GenomicInterval>* GTFParser::get_protein_intervals(const std::string& protein_id) const {
-    auto it = protein_index_.find(protein_id);
+    // Normalize protein_id by removing version number for compatibility
+    std::string normalized_protein_id = protein_id;
+    size_t dot_pos = normalized_protein_id.find('.');
+    if (dot_pos != std::string::npos) {
+        normalized_protein_id = normalized_protein_id.substr(0, dot_pos);
+    }
+    
+    auto it = protein_index_.find(normalized_protein_id);
     return (it != protein_index_.end()) ? &it->second : nullptr;
 }
 
 const std::string* GTFParser::get_transcript_id(const std::string& protein_id) const {
-    auto it = protein_to_transcript_.find(protein_id);
+    // Normalize protein_id by removing version number for compatibility
+    std::string normalized_protein_id = protein_id;
+    size_t dot_pos = normalized_protein_id.find('.');
+    if (dot_pos != std::string::npos) {
+        normalized_protein_id = normalized_protein_id.substr(0, dot_pos);
+    }
+    
+    auto it = protein_to_transcript_.find(normalized_protein_id);
     return (it != protein_to_transcript_.end()) ? &it->second : nullptr;
 }
 
@@ -261,7 +289,7 @@ ErrorCode GTFParser::save_index(const std::string& filename) const {
         uint32_t num_intervals = intervals.size();
         file.write(reinterpret_cast<const char*>(&num_intervals), sizeof(num_intervals));
         
-        // Write intervals
+        // Write intervals (optimized storage)
         for (const auto& interval : intervals) {
             uint16_t chr_len = interval.chromosome.length();
             file.write(reinterpret_cast<const char*>(&chr_len), sizeof(chr_len));
@@ -270,10 +298,14 @@ ErrorCode GTFParser::save_index(const std::string& filename) const {
             file.write(reinterpret_cast<const char*>(&interval.start), sizeof(interval.start));
             file.write(reinterpret_cast<const char*>(&interval.end), sizeof(interval.end));
             file.write(reinterpret_cast<const char*>(&interval.strand), sizeof(interval.strand));
-            file.write(reinterpret_cast<const char*>(&interval.phase), sizeof(interval.phase));
             
-            // Write feature_type as enum value
+            // Write feature_type first to know if we need to read phase
             file.write(reinterpret_cast<const char*>(&interval.feature_type), sizeof(interval.feature_type));
+            
+            // Only store phase for CDS (introns don't need phase)
+            if (interval.feature_type == FeatureType::CDS) {
+                file.write(reinterpret_cast<const char*>(&interval.phase), sizeof(interval.phase));
+            }
             
             // Write transcript_id and gene_id lengths and data
             uint16_t transcript_len = interval.transcript_id.length();
@@ -286,7 +318,7 @@ ErrorCode GTFParser::save_index(const std::string& filename) const {
         }
     }
     
-    // Save gene structures for full mode support
+    // Save gene structures for full mode support (simplified)
     uint32_t num_genes = gene_structures_.size();
     file.write(reinterpret_cast<const char*>(&num_genes), sizeof(num_genes));
     
@@ -296,31 +328,19 @@ ErrorCode GTFParser::save_index(const std::string& filename) const {
         file.write(reinterpret_cast<const char*>(&gene_id_len), sizeof(gene_id_len));
         file.write(gene_id.c_str(), gene_id_len);
         
-        // Write gene structure data
+        // Write minimal gene structure data
         uint16_t chr_len = gene_structure.chromosome.size();
         file.write(reinterpret_cast<const char*>(&chr_len), sizeof(chr_len));
         file.write(gene_structure.chromosome.c_str(), chr_len);
         
-        file.write(reinterpret_cast<const char*>(&gene_structure.gene_start), sizeof(gene_structure.gene_start));
-        file.write(reinterpret_cast<const char*>(&gene_structure.gene_end), sizeof(gene_structure.gene_end));
         file.write(reinterpret_cast<const char*>(&gene_structure.strand), sizeof(gene_structure.strand));
-        file.write(reinterpret_cast<const char*>(&gene_structure.cds_start), sizeof(gene_structure.cds_start));
-        file.write(reinterpret_cast<const char*>(&gene_structure.cds_end), sizeof(gene_structure.cds_end));
         
         // Write protein_id
         uint16_t protein_id_len = gene_structure.protein_id.size();
         file.write(reinterpret_cast<const char*>(&protein_id_len), sizeof(protein_id_len));
         file.write(gene_structure.protein_id.c_str(), protein_id_len);
         
-        // Write exons
-        uint32_t num_exons = gene_structure.exons.size();
-        file.write(reinterpret_cast<const char*>(&num_exons), sizeof(num_exons));
-        for (const auto& exon : gene_structure.exons) {
-            file.write(reinterpret_cast<const char*>(&exon.start), sizeof(exon.start));
-            file.write(reinterpret_cast<const char*>(&exon.end), sizeof(exon.end));
-        }
-        
-        // Write CDS regions
+        // Write only CDS regions (no exons needed)
         uint32_t num_cds = gene_structure.cds_regions.size();
         file.write(reinterpret_cast<const char*>(&num_cds), sizeof(num_cds));
         for (const auto& cds : gene_structure.cds_regions) {
@@ -368,10 +388,16 @@ ErrorCode GTFParser::load_index(const std::string& filename) {
             file.read(reinterpret_cast<char*>(&interval.start), sizeof(interval.start));
             file.read(reinterpret_cast<char*>(&interval.end), sizeof(interval.end));
             file.read(reinterpret_cast<char*>(&interval.strand), sizeof(interval.strand));
-            file.read(reinterpret_cast<char*>(&interval.phase), sizeof(interval.phase));
             
-            // Read feature_type as enum value
+            // Read feature_type first to know if we need to read phase
             file.read(reinterpret_cast<char*>(&interval.feature_type), sizeof(interval.feature_type));
+            
+            // Only read phase for CDS (introns don't have phase stored)
+            if (interval.feature_type == FeatureType::CDS) {
+                file.read(reinterpret_cast<char*>(&interval.phase), sizeof(interval.phase));
+            } else {
+                interval.phase = 0; // Default for non-CDS
+            }
             
             // Read transcript_id and gene_id
             uint16_t transcript_len;
@@ -412,11 +438,7 @@ ErrorCode GTFParser::load_index(const std::string& filename) {
         gene_structure.chromosome.resize(chr_len);
         file.read(&gene_structure.chromosome[0], chr_len);
         
-        file.read(reinterpret_cast<char*>(&gene_structure.gene_start), sizeof(gene_structure.gene_start));
-        file.read(reinterpret_cast<char*>(&gene_structure.gene_end), sizeof(gene_structure.gene_end));
         file.read(reinterpret_cast<char*>(&gene_structure.strand), sizeof(gene_structure.strand));
-        file.read(reinterpret_cast<char*>(&gene_structure.cds_start), sizeof(gene_structure.cds_start));
-        file.read(reinterpret_cast<char*>(&gene_structure.cds_end), sizeof(gene_structure.cds_end));
         
         // Read protein_id
         uint16_t protein_id_len;
@@ -424,19 +446,7 @@ ErrorCode GTFParser::load_index(const std::string& filename) {
         gene_structure.protein_id.resize(protein_id_len);
         file.read(&gene_structure.protein_id[0], protein_id_len);
         
-        // Read exons
-        uint32_t num_exons;
-        file.read(reinterpret_cast<char*>(&num_exons), sizeof(num_exons));
-        gene_structure.exons.reserve(num_exons);
-        
-        for (uint32_t j = 0; j < num_exons; ++j) {
-            GenomicInterval exon;
-            file.read(reinterpret_cast<char*>(&exon.start), sizeof(exon.start));
-            file.read(reinterpret_cast<char*>(&exon.end), sizeof(exon.end));
-            gene_structure.exons.emplace_back(exon);
-        }
-        
-        // Read CDS regions
+        // Read CDS regions only (no exons needed)
         uint32_t num_cds;
         file.read(reinterpret_cast<char*>(&num_cds), sizeof(num_cds));
         gene_structure.cds_regions.reserve(num_cds);
@@ -551,12 +561,10 @@ std::vector<GenomicInterval> GeneStructure::get_introns() const {
 
 // GTFParser methods for building gene structures
 void GTFParser::build_gene_structures() {
-    // Simplified: we don't need complex gene structures anymore
-    // The heavy lifting is done in build_protein_index_from_structures()
+    // Simplified gene structures - only store what we need for intron generation
     gene_structures_.clear();
     
-    // We still need some basic gene structures for compatibility
-    // Group by gene_id for basic statistics
+    // Group by gene_id and collect minimal data
     std::unordered_map<std::string, std::string> gene_to_first_transcript;
     
     for (const auto& [transcript_id, intervals] : temp_transcript_data_) {
@@ -565,22 +573,18 @@ void GTFParser::build_gene_structures() {
             if (gene_to_first_transcript.find(gene_id) == gene_to_first_transcript.end()) {
                 gene_to_first_transcript[gene_id] = transcript_id;
                 
-                // Create minimal gene structure for stats
+                // Create minimal gene structure
                 GeneStructure gene_struct;
                 gene_struct.gene_id = gene_id;
                 gene_struct.chromosome = intervals[0].chromosome;
                 gene_struct.strand = intervals[0].strand;
                 
-                // Calculate bounds
-                auto minmax = std::minmax_element(intervals.begin(), intervals.end(),
-                    [](const GenomicInterval& a, const GenomicInterval& b) {
-                        return a.start < b.start;
-                    });
-                gene_struct.gene_start = minmax.first->start;
-                gene_struct.gene_end = std::max_element(intervals.begin(), intervals.end(),
-                    [](const GenomicInterval& a, const GenomicInterval& b) {
-                        return a.end < b.end;
-                    })->end;
+                // Only collect CDS regions for intron generation
+                for (const auto& interval : intervals) {
+                    if (interval.feature_type == FeatureType::CDS) {
+                        gene_struct.cds_regions.push_back(interval);
+                    }
+                }
                 
                 gene_structures_[gene_id] = std::move(gene_struct);
             }
