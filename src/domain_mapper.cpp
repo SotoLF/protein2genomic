@@ -384,9 +384,16 @@ std::vector<GenomicDomain> DomainMapper::map_domain_detailed(const ProteinDomain
             continue;
         }
         
-        // Include if overlaps with domain span
-        if (interval.start <= domain_genomic_end && interval.end >= domain_genomic_start) {
+        // For detailed format, include ALL CDS and introns in the transcript
+        // For simple format, only include those that overlap with domain span
+        if (format_ == "detailed") {
+            // Include all CDS and introns regardless of domain overlap
             output_intervals.push_back(interval);
+        } else {
+            // Include only if overlaps with domain span
+            if (interval.start <= domain_genomic_end && interval.end >= domain_genomic_start) {
+                output_intervals.push_back(interval);
+            }
         }
     }
     
@@ -426,9 +433,7 @@ std::vector<GenomicDomain> DomainMapper::map_domain_detailed(const ProteinDomain
         
         if (interval.feature_type == FeatureType::CDS) {
             // For CDS, we need to split into overlapping and non-overlapping parts
-            std::vector<std::pair<uint32_t, uint32_t>> cds_parts;
-            
-            // Find overlapping regions with the domain
+            // This applies to both simple and detailed formats
             std::vector<std::pair<uint32_t, uint32_t>> overlapping_parts;
             for (const auto& [range_start, range_end] : domain_genomic_ranges) {
                 if (interval.start <= range_end && interval.end >= range_start) {
@@ -532,7 +537,7 @@ std::vector<GenomicDomain> DomainMapper::map_domain_detailed(const ProteinDomain
             // Increment CDS counter after processing this CDS
             cds_counter++;
         } else {
-            // For introns, handle as before
+            // For introns, handle differently based on format
             GenomicDomain genomic_domain;
             genomic_domain.chromosome = interval.chromosome;
             genomic_domain.protein_id = domain.protein_id;
@@ -544,15 +549,28 @@ std::vector<GenomicDomain> DomainMapper::map_domain_detailed(const ProteinDomain
             genomic_domain.region_index = region_counter++;
             genomic_domain.feature_id = "intron_" + std::to_string(current_intron_id);
             
-            // Check if intron overlaps with domain span
-            if (interval.start <= domain_genomic_end && interval.end >= domain_genomic_start) {
-                genomic_domain.start = std::max(interval.start, domain_genomic_start);
-                genomic_domain.end = std::min(interval.end, domain_genomic_end);
-                genomic_domain.domain_overlap = "Yes";
-            } else {
+            // For detailed format, always show full intron coordinates
+            // For simple format, only show overlapping part
+            if (format_ == "detailed") {
                 genomic_domain.start = interval.start;
                 genomic_domain.end = interval.end;
-                genomic_domain.domain_overlap = "No";
+                // Check if intron overlaps with domain span for annotation
+                if (interval.start <= domain_genomic_end && interval.end >= domain_genomic_start) {
+                    genomic_domain.domain_overlap = "Yes";
+                } else {
+                    genomic_domain.domain_overlap = "No";
+                }
+            } else {
+                // Simple format: only show overlapping part
+                if (interval.start <= domain_genomic_end && interval.end >= domain_genomic_start) {
+                    genomic_domain.start = std::max(interval.start, domain_genomic_start);
+                    genomic_domain.end = std::min(interval.end, domain_genomic_end);
+                    genomic_domain.domain_overlap = "Yes";
+                } else {
+                    genomic_domain.start = interval.start;
+                    genomic_domain.end = interval.end;
+                    genomic_domain.domain_overlap = "No";
+                }
             }
             
             result.push_back(genomic_domain);

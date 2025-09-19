@@ -1,1 +1,0 @@
-/usr/bin/c++ -O3 -DNDEBUG -march=native -mtune=native CMakeFiles/protein2genomic.dir/src/main.cpp.o CMakeFiles/protein2genomic.dir/src/gtf_parser.cpp.o CMakeFiles/protein2genomic.dir/src/domain_mapper.cpp.o CMakeFiles/protein2genomic.dir/src/utils.cpp.o -o protein2genomic  -lpthread /usr/lib/gcc/x86_64-linux-gnu/9/libgomp.so /usr/lib/x86_64-linux-gnu/libpthread.so 

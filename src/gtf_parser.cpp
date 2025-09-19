@@ -525,23 +525,23 @@ std::string get_feature_type_name(FeatureType type) {
 std::vector<GenomicInterval> GeneStructure::get_introns() const {
     std::vector<GenomicInterval> introns;
     
-    if (exons.size() < 2) {
-        return introns; // Need at least 2 exons for introns
+    if (cds_regions.size() < 2) {
+        return introns; // Need at least 2 CDS for introns
     }
     
-    // Sort exons by position
-    auto sorted_exons = exons;
-    std::sort(sorted_exons.begin(), sorted_exons.end());
+    // Sort CDS by position
+    auto sorted_cds = cds_regions;
+    std::sort(sorted_cds.begin(), sorted_cds.end());
     
-    // Generate introns between consecutive exons
-    for (size_t i = 0; i < sorted_exons.size() - 1; ++i) {
-        uint32_t intron_start = sorted_exons[i].end + 1;
-        uint32_t intron_end = sorted_exons[i + 1].start - 1;
+    // Generate introns between consecutive CDS
+    for (size_t i = 0; i < sorted_cds.size() - 1; ++i) {
+        uint32_t intron_start = sorted_cds[i].end + 1;
+        uint32_t intron_end = sorted_cds[i + 1].start - 1;
         
         if (intron_start <= intron_end) { // Valid intron
             introns.emplace_back(chromosome, intron_start, intron_end, 
                                strand, 0, FeatureType::INTRON,
-                               sorted_exons[i].transcript_id, gene_id);
+                               sorted_cds[i].transcript_id, gene_id);
         }
     }
     
@@ -645,23 +645,30 @@ void GTFParser::build_protein_index_from_structures() {
             protein_intervals.insert(protein_intervals.end(), stop_codons.begin(), stop_codons.end());
         }
         
-        // Generate introns if requested and we have multiple exons
-        if (has_feature(requested_features_, FeatureType::INTRON) && exons.size() > 1) {
-            for (size_t i = 0; i < exons.size() - 1; ++i) {
-                uint32_t intron_start = exons[i].end + 1;
-                uint32_t intron_end = exons[i + 1].start - 1;
+        // Generate introns if requested and we have multiple CDS
+        if (has_feature(requested_features_, FeatureType::INTRON) && cdss.size() > 1) {
+            // Sort CDS by position for proper intron calculation
+            auto sorted_cds = cdss;
+            std::sort(sorted_cds.begin(), sorted_cds.end(), 
+                [](const GenomicInterval& a, const GenomicInterval& b) {
+                    return a.start < b.start;
+                });
+            
+            for (size_t i = 0; i < sorted_cds.size() - 1; ++i) {
+                uint32_t intron_start = sorted_cds[i].end + 1;
+                uint32_t intron_end = sorted_cds[i + 1].start - 1;
                 
                 // Only create intron if coordinates are valid
                 if (intron_start <= intron_end) {
                     GenomicInterval intron(
-                        exons[i].chromosome,
+                        sorted_cds[i].chromosome,
                         intron_start,
                         intron_end,
-                        exons[i].strand,
+                        sorted_cds[i].strand,
                         -1, // No phase for introns
                         FeatureType::INTRON,
                         transcript_id,
-                        exons[i].gene_id
+                        sorted_cds[i].gene_id
                     );
                     protein_intervals.push_back(intron);
                 }

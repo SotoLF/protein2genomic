@@ -1,2 +1,19 @@
-*.idx
-*.gtf
+# Build artifacts
+build/
+CMakeFiles/
+CMakeCache.txt
+cmake-build-*/
+compile_commands.json
+Makefile
+*.o
+*.a
+*.so
+*.dylib
+
+# Binaries
+protein2genomic
+
+# Editor/system
+*.log
+*.swp
+.DS_Store
