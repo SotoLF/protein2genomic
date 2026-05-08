@@ -22,6 +22,7 @@ include_directories(${CMAKE_SOURCE_DIR}/include)
 set(SOURCES
     src/gtf_parser.cpp
     src/domain_mapper.cpp
+    src/output_writer.cpp
     src/utils.cpp
 )
 

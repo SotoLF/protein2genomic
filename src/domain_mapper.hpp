@@ -5,68 +5,170 @@
 #include "gtf_parser.hpp"
 
 struct ProteinDomain {
+    std::string input_id;        // user-supplied row identifier (BED column 4 if present, else auto)
     std::string protein_id;
-    uint32_t start;
-    uint32_t end;
-    std::string domain_id;
-    
+    uint32_t start;              // 1-based aa
+    uint32_t end;                // 1-based aa, inclusive
+    std::string domain_id;       // semantic name (BED column 5 if present)
+
     ProteinDomain() : start(0), end(0) {}
-    
-    ProteinDomain(const std::string& pid, uint32_t s, uint32_t e, const std::string& did = "")
-        : protein_id(pid), start(s), end(e), domain_id(did) {}
 };
 
-struct GenomicDomain {
-    std::string chromosome;
-    uint32_t start;
-    uint32_t end;
+// One row per CDS segment that *codes* part of the domain.
+// Backs domain_cds_segments.bed and .tsv.
+struct CodingSegmentRow {
+    std::string chrom;
+    uint32_t genomic_start;      // 1-based, inclusive
+    uint32_t genomic_end;        // 1-based, inclusive
+    char strand;
+    std::string input_id;
+    std::string protein_id;
+    std::string transcript_id;
+    std::string gene_id;
+    std::string gene_name;
+    std::string domain_id;
+    uint32_t aa_start;           // domain aa range
+    uint32_t aa_end;
+    uint32_t segment_index_in_domain; // 1..N across the domain (in translation order)
+    uint32_t cds_nt_start;       // domain-relative nt offsets, 1-based
+    uint32_t cds_nt_end;
+    uint32_t aa_start_encoded;
+    uint32_t aa_end_encoded;
+};
+
+// One row per input domain capturing the full genomic envelope (incl. introns).
+// Backs domain_span_with_introns.bed.
+struct SpanRow {
+    std::string chrom;
+    uint32_t genomic_start;
+    uint32_t genomic_end;
+    char strand;
+    std::string input_id;
     std::string protein_id;
     std::string domain_id;
-    std::string feature_type;
+    std::string gene_name;
+};
+
+// One row per structural feature of the transcript (UTR/CDS/intron),
+// split so that domain-overlapping vs non-overlapping CDS are separate rows.
+// Backs isoform_structure.tsv.
+struct IsoformSegmentRow {
+    std::string input_id;
+    std::string gene_id;
+    std::string gene_name;
+    std::string transcript_id;
+    std::string protein_id;
+    std::string domain_id;
+
+    std::string chrom;
     char strand;
-    uint32_t protein_start;
-    uint32_t protein_end;
-    std::string cds_id;           // For detailed format: CDS_1, CDS_2, etc.
-    std::string domain_overlap;   // For detailed format: Yes/No
-    uint32_t region_index;        // Index of the region (1, 2, 3, ...)
-    std::string feature_id;       // Feature identifier: CDS_1, intron_1, etc.
-    
-    GenomicDomain() : start(0), end(0), strand('+'), protein_start(0), protein_end(0), domain_overlap("No"), region_index(0) {}
+
+    PlotFeatureType feature_type;
+    std::string feature_id;       // five_prime_UTR_1, CDS_1, intron_1, ...
+    uint32_t exon_number;         // 0 for introns
+    uint32_t feature_genomic_start;
+    uint32_t feature_genomic_end;
+    uint32_t feature_length_nt;
+    uint32_t feature_order_genomic;
+    uint32_t feature_order_transcript;
+
+    // CDS-only nucleotide/aa ranges; UTR/intron rows leave these as 0 (printed as NA).
+    bool has_cds_coords;
+    uint32_t cds_nt_start;
+    uint32_t cds_nt_end;
+    uint32_t aa_start_encoded;
+    uint32_t aa_end_encoded;
+
+    DomainOverlapKind overlap;
+    bool has_overlap_coords;
+    uint32_t domain_overlap_genomic_start;
+    uint32_t domain_overlap_genomic_end;
+    uint32_t domain_overlap_cds_nt_start;
+    uint32_t domain_overlap_cds_nt_end;
+    uint32_t domain_overlap_aa_start;
+    uint32_t domain_overlap_aa_end;
+    double domain_overlap_fraction_of_feature;
+    double domain_overlap_fraction_of_domain;
+
+    std::string plot_group;
+
+    IsoformSegmentRow()
+        : strand('+'), feature_type(PlotFeatureType::CDS), exon_number(0),
+          feature_genomic_start(0), feature_genomic_end(0), feature_length_nt(0),
+          feature_order_genomic(0), feature_order_transcript(0),
+          has_cds_coords(false), cds_nt_start(0), cds_nt_end(0),
+          aa_start_encoded(0), aa_end_encoded(0),
+          overlap(DomainOverlapKind::NO), has_overlap_coords(false),
+          domain_overlap_genomic_start(0), domain_overlap_genomic_end(0),
+          domain_overlap_cds_nt_start(0), domain_overlap_cds_nt_end(0),
+          domain_overlap_aa_start(0), domain_overlap_aa_end(0),
+          domain_overlap_fraction_of_feature(0.0),
+          domain_overlap_fraction_of_domain(0.0) {}
+};
+
+// One row per input domain — successful or partial.
+struct MappingSummaryRow {
+    std::string input_id;
+    std::string protein_id;
+    std::string transcript_id;
+    std::string gene_id;
+    std::string gene_name;
+    std::string domain_id;
+    std::string chrom;
+    char strand;
+    uint32_t aa_start;
+    uint32_t aa_end;
+    uint32_t domain_length_aa;
+    uint32_t domain_length_nt;
+    uint32_t protein_length_aa;
+    uint32_t domain_genomic_start;
+    uint32_t domain_genomic_end;
+    uint32_t n_coding_segments;
+    bool fully_mapped;
+};
+
+struct UnmappedDomainRow {
+    std::string input_id;
+    std::string protein_id;
+    uint32_t aa_start;
+    uint32_t aa_end;
+    std::string domain_id;
+    std::string reason;
+};
+
+// Per-domain result bundle, computed once and consumed by the writers.
+struct DomainResult {
+    ProteinDomain domain;
+    bool mapped;
+    UnmappedDomainRow unmapped;
+
+    MappingSummaryRow summary;
+    std::vector<CodingSegmentRow> coding_segments;
+    SpanRow span;
+    std::vector<IsoformSegmentRow> isoform_segments;
+
+    DomainResult() : mapped(false) {}
 };
 
 class DomainMapper {
-private:
-    const GTFParser& gtf_parser_;
-    std::vector<ProteinDomain> domains_;
-    std::vector<GenomicDomain> results_;
-    std::string mode_;           // "basic" or "full"
-    std::string format_;         // "simple" or "detailed"
-    
-    // Coordinate conversion methods
-    std::vector<GenomicDomain> map_domain_to_genomic(const ProteinDomain& domain) const;
-    std::vector<GenomicDomain> map_domain_detailed(const ProteinDomain& domain) const;
-    uint32_t protein_to_genomic_position(uint32_t protein_pos, 
-                                        const std::vector<GenomicInterval>& intervals,
-                                        char strand) const;
-    
-    // Optimization: batch processing
-    void process_domains_batch(const std::vector<ProteinDomain>& batch);
-    
 public:
-    explicit DomainMapper(const GTFParser& parser, const std::string& mode = "basic", const std::string& format = "simple");
-    ~DomainMapper() = default;
-    
-    // Main interface
+    DomainMapper(const GTFParser& parser, OutputKind output_kind);
+
     ErrorCode load_domains(const std::string& bed_filename);
     ErrorCode process_domains();
-    ErrorCode write_results(const std::string& output_filename, const std::string& format = "bed") const;
-    
-    // Statistics
-    size_t get_domain_count() const { return domains_.size(); }
-    size_t get_mapped_count() const;
-    size_t get_unmapped_count() const;
-    
-    void clear() { domains_.clear(); results_.clear(); }
+
+    const std::vector<DomainResult>& results() const { return results_; }
+    size_t domain_count() const { return domains_.size(); }
+    size_t mapped_count() const;
+    size_t unmapped_count() const { return domain_count() - mapped_count(); }
+
+private:
+    const GTFParser& gtf_;
+    OutputKind output_kind_;
+    std::vector<ProteinDomain> domains_;
+    std::vector<DomainResult> results_;
+
+    DomainResult process_one(const ProteinDomain& d) const;
 };
 
 #endif // DOMAIN_MAPPER_HPP
