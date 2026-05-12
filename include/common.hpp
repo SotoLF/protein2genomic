@@ -44,9 +44,10 @@ enum class FeaturePriority {
 // What the user wants the package to produce.
 // Selected via --output {coding,span,isoform,all}.
 enum class OutputKind {
-    CODING,    // domain_cds_segments.{bed,tsv}
-    SPAN,      // domain_span_with_introns.bed
-    ISOFORM,   // isoform_structure.tsv (UTR/CDS/intron, plot-ready)
+    CODING,    // domain_cds_segments.{bed,tsv} — ALL CDS rows + overlap column
+    INTRONS,   // domain_introns.{bed,tsv}     — ALL intron rows + overlap column
+    SPAN,      // domain_span_with_introns.bed — single envelope row per domain
+    ISOFORM,   // isoform_structure.tsv         — UTR/CDS/intron, plot-ready
     ALL        // everything plus summary + unmapped + run_metadata
 };
 

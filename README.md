@@ -2,12 +2,14 @@
 
 Map protein domain coordinates to genomic / transcript structure using a GTF annotation.
 
-For each input domain (a `protein_id` and an aa range), the tool answers two related but distinct questions:
+For each input query (a `protein_id` and, optionally, an aa range), the tool answers two related but distinct questions:
 
 1. **Mapping** — *which exact genomic bases code this domain?*
 2. **Structure / visualization** — *how is the whole transcript organized in 5′UTR / CDS / 3′UTR / intron, and where does the domain fall on it?*
 
-The two questions correspond to different output modes (`coding`, `span`, `isoform`, `all`). The `isoform` mode is the plot-ready one: it returns a single tidy table with one row per structural feature of the transcript and an explicit overlap classification per row.
+The two questions correspond to different output modes (`coding`, `introns`, `span`, `isoform`, `all`). Each mode emits every feature of its type (e.g. every CDS or every intron of the transcript) together with a column that says which ones overlap the domain. The companion BED is the subset that actually overlaps with the domain.
+
+A row that has only a `protein_id` (no aa range) is processed as *whole-transcript structure with no domain* — overlap columns are `NA` and the BED subsets are empty for that row. This makes it easy to plot a protein's transcript architecture even before any domain annotation exists.
 
 ---
 
@@ -20,21 +22,20 @@ The two questions correspond to different output modes (`coding`, `span`, `isofo
 5. [Coordinate conventions](#coordinate-conventions)
 6. [File-by-file schemas](#file-by-file-schemas)
    - [domain_mapping_summary.tsv](#domain_mapping_summarytsv)
-   - [domain_cds_segments.bed](#domain_cds_segmentsbed)
-   - [domain_cds_segments.tsv](#domain_cds_segmentstsv)
-   - [domain_span_with_introns.bed](#domain_span_with_intronsbed)
-   - [isoform_structure.tsv](#isoform_structuretsv)
+   - [Feature TSVs (coding / introns / isoform)](#feature-tsvs-domain_cds_segmentstsv--domain_intronstsv--isoform_structuretsv)
+   - [Companion BEDs](#companion-beds)
    - [unmapped_domains.tsv](#unmapped_domainstsv)
    - [run_metadata.json](#run_metadatajson)
 7. [Worked example](#worked-example)
-8. [GTF compatibility & index](#gtf-compatibility--index)
-9. [CLI reference](#cli-reference)
+8. [Benchmarks](#benchmarks)
+9. [GTF compatibility & index](#gtf-compatibility--index)
+10. [CLI reference](#cli-reference)
 
 ---
 
 ## Build
 
-Requirements: C++17, CMake ≥ 3.16, OpenMP (optional, parallelizes domain processing).
+Requirements: C++17, CMake ≥ 3.16, OpenMP (optional, parallelizes per-query processing).
 
 ```bash
 mkdir build && cd build
@@ -48,10 +49,10 @@ The binary is produced at `build/protein2genomic`.
 
 ```bash
 # 1. Build a binary index from a GTF (one-time per annotation)
-./protein2genomic --gtf gencode.v49.basic.annotation.gtf \
+./protein2genomic --gtf gencode.v49.primary_assembly.annotation.gtf \
                   --build-index --index human.idx
 
-# 2. Map a BED of domains using that index
+# 2. Map a BED of domain queries using that index
 ./protein2genomic --index human.idx \
                   --bed domains.bed \
                   --out-dir results \
@@ -65,42 +66,45 @@ The binary is produced at `build/protein2genomic`.
 Whitespace-separated, BED-like. Lines beginning with `#` are ignored.
 
 ```
+# rows with a domain
 ENSP00000269305    10    50    AD1    TF1
 ENSP00000306245     5   100    RD1    TF2
+
+# row without a domain (whole-transcript structure)
+ENSP00000418960
 ```
 
 | Column | Required | Meaning |
 |---|---|---|
 | 1 | yes | `protein_id` (versioned or unversioned; the tool strips the suffix) |
-| 2 | yes | `aa_start` — 1-based inclusive |
-| 3 | yes | `aa_end` — 1-based inclusive |
-| 4 | no | `domain_id` (used as `input_id` for tracking) |
+| 2 | no  | `aa_start` — 1-based inclusive. Omit (or set to 0) for no-domain mode. |
+| 3 | no  | `aa_end` — 1-based inclusive. Omit (or set to 0) for no-domain mode. |
+| 4 | no  | `domain_id` (used as `input_id` for tracking) |
 | 5+ | no | ignored |
 
-If column 4 is missing, `input_id` falls back to `protein_id:aa_start-aa_end`, so every row remains identifiable in the outputs.
+If column 4 is missing and a domain is present, `input_id` falls back to `protein_id:aa_start-aa_end`. In no-domain mode it falls back to `protein_id`. Every row remains identifiable in the outputs.
 
 ## Output modes
 
-Pass `--output KIND` together with `--out-dir DIR`. All modes additionally write `domain_mapping_summary.tsv` (one row per input domain, ok or not) and `unmapped_domains.tsv` (only if at least one row failed).
+Pass `--output KIND` together with `--out-dir DIR`. All modes additionally write `domain_mapping_summary.tsv` (one row per input query, ok or not) and `unmapped_domains.tsv` (only if at least one row failed).
 
-| `--output` | Question it answers | Files written (in addition to summary / unmapped) |
-|---|---|---|
-| `coding` | Which exact genomic bases code each domain? | `domain_cds_segments.bed`, `domain_cds_segments.tsv` |
-| `span` | What is the genomic envelope of the domain (incl. introns between coding CDS)? | `domain_span_with_introns.bed` |
-| `isoform` | How is the whole transcript organized, and where does the domain fall on it? | `isoform_structure.tsv` |
-| `all` (default) | Everything above. | All of the above + `run_metadata.json` |
+| `--output` | Question it answers | TSV(s) written | BED(s) written |
+|---|---|---|---|
+| `coding`  | Where are the CDS exons of this transcript, and which overlap the domain? | `domain_cds_segments.tsv` (all CDS rows + overlap) | `domain_cds_segments.bed` (subset: `coding_overlap` rows) |
+| `introns` | Where are the introns of this transcript, and which lie within the domain span? | `domain_introns.tsv` (all intron rows + overlap) | `domain_introns.bed` (subset: `inside_domain_genomic_span` rows) |
+| `span`    | What is the single genomic envelope of the domain, introns included? | — | `domain_span_with_introns.bed` (one row per domain) |
+| `isoform` | How is the whole transcript organized (UTR/CDS/intron), and where does the domain fall on it? | `isoform_structure.tsv` (all structural rows) | — |
+| `all` (default) | Everything above. | all four TSVs | all three BEDs + `run_metadata.json` |
 
-### `coding`
-For each domain, the **exact CDS genomic segments** that encode it. A domain that spans 3 CDS exons produces 3 rows. Rows are emitted in **translation order** (so `segment_index_in_domain = 1` is the most 5′ CDS slice of the protein).
+### Notes on `coding` and `introns`
 
-### `span`
-For each domain, the **single genomic envelope** from the first to the last domain-coding base, including any introns between them. Useful for locus-level views (IGV, browser tracks).
+These modes emit **all** features of that type in the transcript. The TSV is the full table, and the BED is the subset that overlaps with the domain — so you can drop the BED directly into bedtools/IGV without filtering, while the TSV lets you reason about non-overlapping features too.
 
-### `isoform`
-The **plot-ready transcript structure**. One row per structural feature (`five_prime_UTR`, `CDS`, `three_prime_UTR`, `intron`). CDS exons that are partially covered by the domain are split into separate rows so that `domain` vs `no-domain` portions are independent rows. This is the table to drive an isoform-architecture figure.
+In no-domain mode, the overlap columns are `NA` and the companion BEDs are empty for those rows (there is no domain to subset to).
 
-### `all`
-Everything above plus `run_metadata.json` (tool version, output kind, annotation source, coordinate conventions, mapped / unmapped counts, timestamp, full CLI invocation).
+### Notes on `isoform`
+
+This is the plot-ready table. One row per structural feature. CDS exons that the domain partially covers are **split** so that the domain-overlapping portion and the non-overlapping portion are separate rows. **The split rows keep the original CDS number** — only `feature_part` distinguishes them. See [CDS splitting](#cds-splitting--feature_id-and-feature_part) below.
 
 ## Coordinate conventions
 
@@ -109,9 +113,9 @@ Everything above plus `run_metadata.json` (tool version, output kind, annotation
 | `*.bed` | 0-based half-open (BED standard). `start = 0-based inclusive`, `end = 0-based exclusive`. |
 | `*.tsv` | 1-based inclusive for genomic, CDS-nt, and aa coordinates. Same as GTF. |
 
-`NA` means *not applicable to this row* (e.g. CDS-nt fields on a UTR row).
+`NA` means *not applicable to this row* (e.g. CDS-nt fields on a UTR row, or overlap fields in no-domain mode).
 
-> **Why does the BED differ by 1 from the TSV?** They describe the same interval in different conventions. A CDS at GTF positions `7676219..7676272` (1-based inclusive, length 54) is BED `7676218..7676272` (0-based half-open, length still 54). `end - start` matches the length in both systems; only `start` shifts.
+> **Why does the BED differ by 1 from the TSV?** Same interval, different convention. A CDS at GTF positions `7676219..7676272` (1-based inclusive, length 54) is BED `7676218..7676272` (0-based half-open, length still 54). `end - start` matches the length in both systems; only `start` shifts.
 
 ---
 
@@ -119,77 +123,38 @@ Everything above plus `run_metadata.json` (tool version, output kind, annotation
 
 ### `domain_mapping_summary.tsv`
 
-One row per input domain, written for every `--output` mode.
+One row per input query, written for every `--output` mode.
 
 | Column | Type | Meaning |
 |---|---|---|
-| `input_id` | string | User-supplied identifier (BED column 4 if present, else `protein_id:aa_start-aa_end`) |
+| `input_id` | string | User-supplied identifier |
 | `protein_id` | string | Normalized (version suffix stripped) |
 | `transcript_id` | string | Transcript that this protein belongs to |
 | `gene_id` | string | Ensembl gene id |
-| `gene_name` | string | HGNC-style gene symbol (if present in the GTF) |
+| `gene_name` | string | HGNC-style gene symbol |
 | `domain_id` | string | BED column 4 (if any) |
-| `chrom` | string | Chromosome of the transcript |
-| `strand` | char | `+` or `−` |
-| `aa_start` | int | Input domain start (1-based inclusive aa) |
-| `aa_end` | int | Input domain end |
-| `domain_length_aa` | int | `aa_end − aa_start + 1` |
-| `domain_length_nt` | int | `domain_length_aa × 3` |
+| `chrom`, `strand` | | Chromosome and strand of the transcript |
+| `aa_start`, `aa_end` | int / NA | Input domain bounds; `NA` in no-domain mode |
+| `domain_length_aa` | int / NA | `aa_end − aa_start + 1` |
+| `domain_length_nt` | int / NA | `domain_length_aa × 3` |
 | `protein_length_aa` | int | Total CDS length / 3 for this protein |
-| `domain_genomic_start` | int | Min genomic coord of any domain-coding base (1-based) |
-| `domain_genomic_end` | int | Max genomic coord of any domain-coding base (1-based) |
-| `n_coding_segments` | int | How many CDS slices the domain spans |
-| `fully_mapped` | bool | `true` if the entire aa range fits inside the CDS, else `false` (the range was clipped to fit) |
-| `status` | string | `ok` / `partial` / unmapped reason |
+| `domain_genomic_start` / `_end` | int / NA | Genomic envelope of the domain |
+| `n_coding_segments` | int / NA | Number of CDS exon slices the domain spans |
+| `fully_mapped` | bool | `true` if the entire aa range fits inside the CDS |
+| `no_domain_mode` | bool | `true` if the BED row had no aa range |
+| `status` | string | `ok` / `partial` / `structure_only` / unmapped reason |
 
-### `domain_cds_segments.bed`
+### Feature TSVs (`domain_cds_segments.tsv`, `domain_introns.tsv`, `isoform_structure.tsv`)
 
-6-column BED, one row per CDS slice that codes the domain.
+All three share the same column layout, differing only in which feature types they include:
 
-| Column | Meaning |
+| File | Rows |
 |---|---|
-| 1 | `chrom` |
-| 2 | `start` — 0-based |
-| 3 | `end` — 0-based exclusive |
-| 4 | `name` — `protein_id[_domain_id]_aa_start-aa_end` |
-| 5 | `score` — always `0` |
-| 6 | `strand` |
+| `domain_cds_segments.tsv` | every CDS row |
+| `domain_introns.tsv`      | every intron row |
+| `isoform_structure.tsv`   | every 5′UTR / CDS / 3′UTR / intron row |
 
-Rows are emitted in **translation order** for a given domain; on `−` strand this means high genomic coord first. If you need genomic-ascending order, run `sort -k1,1 -k2,2n` after.
-
-### `domain_cds_segments.tsv`
-
-Same segments as the BED, with full annotation.
-
-| Column | Type | Meaning |
-|---|---|---|
-| `input_id`, `protein_id`, `transcript_id`, `gene_id`, `gene_name`, `domain_id` | string | Identity columns |
-| `chrom`, `strand` | | |
-| `genomic_start` | int | 1-based inclusive |
-| `genomic_end` | int | 1-based inclusive |
-| `segment_index_in_domain` | int | 1..N in translation order |
-| `cds_nt_start`, `cds_nt_end` | int | CDS-relative nt offsets (1-based) of this slice |
-| `aa_start_encoded`, `aa_end_encoded` | int | Range of aa that this slice encodes |
-| `aa_start`, `aa_end` | int | The input domain bounds (repeated on every row of the same domain, for joining) |
-
-### `domain_span_with_introns.bed`
-
-6-column BED, one row per input domain. `start..end` covers from the first to the last domain-coding base, so introns between coding CDS are inside the interval.
-
-| Column | Meaning |
-|---|---|
-| 1 | `chrom` |
-| 2 | `start` — 0-based |
-| 3 | `end` — 0-based exclusive |
-| 4 | `name` — `protein_id[_domain_id]_aa_start-aa_end` |
-| 5 | `score` — always `0` |
-| 6 | `strand` |
-
-### `isoform_structure.tsv`
-
-The plot-ready table. One row per structural feature of the transcript, in genomic order. CDS exons are **split** when the domain only overlaps part of them, so a single original CDS exon can produce up to 3 rows: the no-domain part before, the coding-overlap part, and the no-domain part after.
-
-Columns are grouped by purpose. `NA` means the column does not apply to that row type.
+You can therefore `cat` or `join` them on `input_id`/`feature_id` interchangeably.
 
 #### Identity columns
 
@@ -217,8 +182,20 @@ Columns are grouped by purpose. `NA` means the column does not apply to that row
 | Column | Meaning |
 |---|---|
 | `feature_type` | One of `five_prime_UTR`, `CDS`, `three_prime_UTR`, `intron` |
-| `feature_id` | `<feature_type>_<n>` numbered in **translation order**. `CDS_1` is the most 5′ CDS in the protein, `CDS_2` the next, etc. After CDS-splitting, two adjacent rows may share the same `feature_id` because they are slices of the same original CDS exon |
-| `exon_number` | Source GTF `exon_number` for UTR / CDS rows. `NA` for introns |
+| `feature_id` | **Stable across splits**. Numbered in translation order: `CDS_1` is the most 5′ CDS of the protein, then `CDS_2`, etc. UTRs and introns are numbered separately (`five_prime_UTR_1`, `intron_1`, …) |
+| `feature_part` | 1..K when a CDS row was split by partial domain overlap; pieces of the same original CDS share the same `feature_id` and differ by `feature_part`. Always `1` for UTR / intron rows |
+| `exon_number` | Source GTF `exon_number` for UTR / CDS rows; `NA` for introns |
+
+#### CDS splitting — `feature_id` and `feature_part`
+
+A single GTF CDS exon can be split into multiple isoform-structure rows when the domain only covers part of it. The pieces always share the same `feature_id` — only `feature_part` differs. Example: domain ends in the middle of `CDS_2` (translation order), so `CDS_2` produces two rows:
+
+| feature_id | feature_part | start | end | overlaps_domain |
+|---|---|---|---|---|
+| CDS_2 | 1 | 75278995 | 75279120 | coding_overlap |
+| CDS_2 | 2 | 75279121 | 75279123 | no |
+
+To re-aggregate the full original CDS, group by `(input_id, feature_id)`. To plot the overlap shape, fill by `plot_group` and ignore `feature_part`.
 
 #### Ordering columns
 
@@ -246,39 +223,56 @@ The mapping is `aa = ⌈cds_nt / 3⌉`. A 1-nt CDS slice that contains only the 
 
 | Value | Meaning |
 |---|---|
-| `no` | The row is outside the domain entirely. UTR rows always carry `no` (UTRs cannot encode the domain even if they fall inside the genomic envelope) |
-| `coding_overlap` | CDS row whose genomic interval overlaps a domain-coding range. The row encodes part of the domain |
-| `inside_domain_genomic_span` | Intron located between two `coding_overlap` CDS rows. The intron itself does not encode the domain, but it lies inside the domain's genomic envelope and should usually be drawn the same colour as the surrounding domain CDS |
+| `no` | The row is outside the domain entirely. UTR rows always carry `no` |
+| `coding_overlap` | CDS row whose genomic interval overlaps a domain-coding range |
+| `inside_domain_genomic_span` | Intron located between two `coding_overlap` CDS rows |
+| `NA` | No-domain query (no domain to compare against) |
 
 The companion columns are filled only for `coding_overlap` rows:
 
 | Column | Meaning |
 |---|---|
-| `domain_overlap_genomic_start` / `_end` | The sub-interval of this row that codes the domain (1-based inclusive). For a fully coding row this equals `feature_genomic_start..feature_genomic_end` |
+| `domain_overlap_genomic_start` / `_end` | Sub-interval of this row that codes the domain (1-based inclusive) |
 | `domain_overlap_cds_nt_start` / `_end` | Same overlap projected to CDS-nt (1-based) |
 | `domain_overlap_aa_start` / `_end` | Same overlap projected to aa |
-| `domain_overlap_fraction_of_feature` | overlap_length / `feature_length_nt`. `1.0000` if the row is fully inside the domain |
+| `domain_overlap_fraction_of_feature` | overlap_length / `feature_length_nt` |
 | `domain_overlap_fraction_of_domain` | overlap_length / `domain_length_nt`. Sums to `1.0` across all `coding_overlap` rows of the same domain |
 
 #### Plotting column
 
-`plot_group` is a single string suitable for direct mapping to a colour scale:
+`plot_group` is a single string suitable for direct color mapping:
+
+With a domain:
 
 | Value | Maps to |
 |---|---|
-| `five_prime_UTR` | 5′ UTR exon segment |
-| `three_prime_UTR` | 3′ UTR exon segment |
-| `CDS_no_domain` | CDS segment outside the domain |
-| `CDS_domain` | CDS segment that encodes the domain |
+| `five_prime_UTR` / `three_prime_UTR` | UTR exon segment |
+| `CDS_no_domain` | CDS outside the domain |
+| `CDS_domain` | CDS that encodes the domain |
 | `intron` | Intron outside the domain genomic span |
 | `intron_domain_span` | Intron between two `CDS_domain` rows |
 
+In no-domain mode, `plot_group` is just the feature type: `five_prime_UTR`, `CDS`, `three_prime_UTR`, `intron`.
+
 In `ggplot`/`ggtranscript`-style code:
+
 ```r
 ggplot(rows, aes(xmin = feature_genomic_start, xmax = feature_genomic_end,
                  y = transcript_id, fill = plot_group)) +
   geom_rect()
 ```
+
+### Companion BEDs
+
+All three companion BEDs are 6-column standard BED (`chrom`, `start_0based`, `end`, `name`, `score=0`, `strand`).
+
+| File | Rows |
+|---|---|
+| `domain_cds_segments.bed` | CDS rows with `overlaps_domain == coding_overlap` |
+| `domain_introns.bed` | intron rows with `overlaps_domain == inside_domain_genomic_span` |
+| `domain_span_with_introns.bed` | one row per domain (genomic envelope, introns included) |
+
+`name` is `protein_id[_domain_id]_<aa_start>-<aa_end>`. No-domain queries contribute zero rows to any companion BED.
 
 ### `unmapped_domains.tsv`
 
@@ -298,7 +292,7 @@ Written only with `--output all`. Records:
 - `annotation_source` — path to GTF or index used
 - `index_format_version`
 - `coordinate_conventions` — restated explicitly
-- `domain_counts` — `{ total, mapped, unmapped }`
+- `query_counts` — `{ total, mapped, unmapped, no_domain_mode }`
 - `cli` — full argv of the invocation
 
 ---
@@ -318,25 +312,69 @@ ENSP00000306245    5    100    RD1    TF2
 
 Domain `RD1` (aa 5..100) spans the end of slice 1 and most of slice 2. The relevant rows of `isoform_structure.tsv` look like (selected columns shown):
 
-| feature_type | feature_id | feature_genomic_start | feature_genomic_end | aa_start_encoded | aa_end_encoded | overlaps_domain | plot_group |
-|---|---|---|---|---|---|---|---|
-| CDS | CDS_1 | 75278983 | 75278994 | 1 | 4 | no | CDS_no_domain |
-| CDS | CDS_2 | 75278995 | 75279123 | 5 | 47 | coding_overlap | CDS_domain |
-| intron | intron_1 | 75279124 | 75279876 | NA | NA | inside_domain_genomic_span | intron_domain_span |
-| CDS | CDS_3 | 75279877 | 75280035 | 48 | 100 | coding_overlap | CDS_domain |
-| CDS | CDS_4 | 75280036 | 75280128 | 101 | 131 | no | CDS_no_domain |
-| intron | intron_2 | 75280129 | 75280559 | NA | NA | no | intron |
-| ... | ... | ... | ... | ... | ... | ... | ... |
-| three_prime_UTR | three_prime_UTR_1 | 75281422 | 75282230 | NA | NA | no | three_prime_UTR |
+| feature_type | feature_id | feature_part | feature_genomic_start | feature_genomic_end | aa_start_encoded | aa_end_encoded | overlaps_domain | plot_group |
+|---|---|---|---|---|---|---|---|---|
+| CDS | CDS_1 | 1 | 75278983 | 75278994 | 1 | 4 | no | CDS_no_domain |
+| CDS | CDS_2 | 1 | 75278995 | 75279123 | 5 | 47 | coding_overlap | CDS_domain |
+| intron | intron_1 | 1 | 75279124 | 75279876 | NA | NA | inside_domain_genomic_span | intron_domain_span |
+| CDS | CDS_3 | 1 | 75279877 | 75280035 | 48 | 100 | coding_overlap | CDS_domain |
+| CDS | CDS_4 | 1 | 75280036 | 75280128 | 101 | 131 | no | CDS_no_domain |
+| intron | intron_2 | 1 | 75280129 | 75280559 | NA | NA | no | intron |
+| ... | ... | ... | ... | ... | ... | ... | ... | ... |
+| three_prime_UTR | three_prime_UTR_1 | 1 | 75281422 | 75282230 | NA | NA | no | three_prime_UTR |
 
-Reading this row by row:
-- `CDS_1` exists in the transcript but encodes aa 1..4 — outside the domain (which starts at aa 5).
-- `CDS_2` is fully inside the domain; it encodes aa 5..47.
-- `intron_1` is between two `CDS_domain` rows, so it's marked `inside_domain_genomic_span` even though introns can't code anything.
-- `CDS_3` is fully inside the domain; it encodes aa 48..100.
-- `CDS_4` and beyond are outside the domain.
+To plot, fill by `plot_group`. To highlight the domain, the rows you want are `plot_group ∈ {CDS_domain, intron_domain_span}`. To get just the genomic bases that code the domain, take `domain_cds_segments.bed` (it already contains only the `coding_overlap` rows).
 
-To plot, fill by `plot_group`. To highlight the domain, the rows you want are `plot_group ∈ {CDS_domain, intron_domain_span}`.
+If the same input file had `ENSP00000306245` on its own line (no aa columns), an additional set of rows for the whole transcript would be emitted, all with `overlaps_domain = NA`, `plot_group = CDS / intron / five_prime_UTR / three_prime_UTR`.
+
+---
+
+## Benchmarks
+
+Measured on a single core against the pre-built human GENCODE v49 index (3.17 GB GTF → 128 MB binary index). Reproduce with `python3 benchmarks/run_benchmark.py && python3 benchmarks/plot_benchmark.py`.
+
+![Scaling on human GENCODE v49](benchmarks/scaling.png)
+
+### Index build (one-time per annotation)
+
+| Metric | Value |
+|---|---|
+| GTF size (uncompressed) | 3,173 MB |
+| Lines parsed | ~5.8 M |
+| Wall time | **18.1 s** |
+| Peak RSS | 2.1 GB |
+| Output index size | 128 MB |
+| Compression ratio | ~25× |
+
+The index includes per-protein exon and CDS intervals plus `gene_id`, `gene_name`, `exon_number`. You build it once and reuse it forever (or until GENCODE updates).
+
+### Query performance (single-threaded, median of 3 reps)
+
+| Queries | `--output all` (wall / peak RSS) | `--output isoform` (wall / peak RSS) |
+|---|---|---|
+| 100 | 1.7 s / 847 MB | 1.6 s / 847 MB |
+| 1,000 | 2.1 s / 858 MB | 1.7 s / 859 MB |
+| 10,000 | 5.5 s / 974 MB | 3.3 s / 974 MB |
+| 100,000 | 37 s / 2,126 MB | 17.6 s / 2,125 MB |
+
+Effective throughput at 100k queries: ~2,800 q/s in `--output all` mode, ~5,700 q/s in `--output isoform` mode. The `all` mode is slower because it writes four TSV files and three BED files vs. one TSV in `isoform`.
+
+The constant ~1.5 s floor at small N is index loading. Once the index is in memory, per-query cost is roughly linear and dominated by output formatting. Memory grows because output strings accumulate before being written; running with `--threads N` shifts time but not peak RSS appreciably.
+
+### Reproducing the benchmark
+
+```bash
+# In the conda env that has matplotlib + numpy
+python3 benchmarks/run_benchmark.py \
+  --sizes 100 1000 10000 100000 \
+  --modes all isoform \
+  --reps 3 --threads 1
+
+python3 benchmarks/plot_benchmark.py
+# results.tsv, index_build.json, scaling.png in benchmarks/
+```
+
+You can add `--sizes 1000000` for a million-query stress test (allow ~5–10 min). Use `--threads N` to test parallelism.
 
 ---
 
@@ -349,7 +387,7 @@ Both major GTF flavours work without configuration:
 
 The tool normalizes IDs by stripping the `.<version>` suffix on both sides (GTF and BED), so a BED with versioned protein IDs works against an Ensembl-derived index, and vice versa.
 
-The binary index stores per-protein exon and CDS intervals plus `gene_id`, `gene_name`, and `exon_number`. The format is versioned (`INDEX_FORMAT_VERSION = 2`); loading an older index returns an explicit error asking you to rebuild it. Rebuild is fast (~10 s for human GENCODE).
+The binary index format is versioned (`INDEX_FORMAT_VERSION = 2`); loading an older index returns an explicit error asking you to rebuild it.
 
 ---
 
@@ -361,14 +399,16 @@ USAGE
   protein2genomic (--gtf FILE | --index FILE) --bed FILE --out-dir DIR [--output KIND]
 
 OPTIONS
-  --bed FILE       BED with rows: protein_id  aa_start  aa_end  [domain_id]
-                   aa coordinates are 1-based inclusive.
+  --bed FILE       Query file (TSV/BED-like). Rows can be:
+                     protein_id  aa_start  aa_end  [domain_id]
+                   or, for whole-transcript structure with no domain:
+                     protein_id
   --out-dir DIR    Output directory (created if missing).
   --gtf FILE       GTF annotation, parsed on the fly.
   --index FILE     Pre-built binary index (faster, recommended).
-  --output KIND    {coding, span, isoform, all}. Default: all.
+  --output KIND    {coding, introns, span, isoform, all}. Default: all.
   --build-index    Build a binary index from --gtf into --index.
-  --threads NUM    Process domains in parallel via OpenMP. Default: 1.
+  --threads NUM    Process queries in parallel via OpenMP. Default: 1.
   --verbose        Log progress to stderr.
   --version        Print version and exit.
   --help           Full help including all output schemas.

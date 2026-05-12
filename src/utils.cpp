@@ -53,8 +53,10 @@ size_t MemoryTracker::get_current_memory_usage() {
 void MemoryTracker::print_memory_stats() {
     size_t current = get_current_memory_usage();
     size_t peak = get_peak_memory_usage();
-    
-    std::cerr << "Estimated memory usage: " << current / (1024 * 1024) << " MB" << std::endl;
+    std::cerr << "Memory: current=" << current / (1024 * 1024)
+              << "MB peak=" << peak / (1024 * 1024) << "MB" << std::endl;
+    // Machine-parseable line for benchmark scripts.
+    std::cerr << "BENCH_PEAK_RSS_MB " << peak / (1024 * 1024) << std::endl;
 }
 
 namespace utils {

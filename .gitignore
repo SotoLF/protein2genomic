@@ -17,3 +17,5 @@ protein2genomic
 *.log
 *.swp
 .DS_Store
+benchmarks/work/
+benchmarks/proteins_list.txt

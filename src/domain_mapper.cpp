@@ -4,6 +4,7 @@
 #include <sstream>
 #include <algorithm>
 #include <set>
+#include <unordered_map>
 
 #ifdef USE_OPENMP
 #include <omp.h>
@@ -15,12 +16,9 @@ inline bool intervals_overlap(uint32_t a_s, uint32_t a_e, uint32_t b_s, uint32_t
     return a_s <= b_e && b_s <= a_e;
 }
 
-// CDS intervals in translation order: + strand keeps genomic order, - strand reversed.
 std::vector<GenomicInterval> cds_in_translation_order(const std::vector<GenomicInterval>& intervals) {
     std::vector<GenomicInterval> cds;
-    for (const auto& iv : intervals) {
-        if (iv.feature_type == FeatureType::CDS) cds.push_back(iv);
-    }
+    for (const auto& iv : intervals) if (iv.feature_type == FeatureType::CDS) cds.push_back(iv);
     std::sort(cds.begin(), cds.end(),
               [](const GenomicInterval& a, const GenomicInterval& b) { return a.start < b.start; });
     if (!cds.empty() && cds[0].strand == '-') std::reverse(cds.begin(), cds.end());
@@ -29,29 +27,21 @@ std::vector<GenomicInterval> cds_in_translation_order(const std::vector<GenomicI
 
 std::vector<GenomicInterval> exons_in_genomic_order(const std::vector<GenomicInterval>& intervals) {
     std::vector<GenomicInterval> exons;
-    for (const auto& iv : intervals) {
-        if (iv.feature_type == FeatureType::EXON) exons.push_back(iv);
-    }
+    for (const auto& iv : intervals) if (iv.feature_type == FeatureType::EXON) exons.push_back(iv);
     std::sort(exons.begin(), exons.end(),
               [](const GenomicInterval& a, const GenomicInterval& b) { return a.start < b.start; });
     return exons;
 }
 
 struct DomainGenomic {
-    // One sub-range per CDS-in-translation-order that the domain overlaps.
-    // Each entry stores the genomic [start,end] of the overlap and the
-    // translation-frame nt offsets [nt_start_in_cds, nt_end_in_cds] (1-based,
-    // domain-relative? -> we use cds-relative cumulative).
     struct Range {
         uint32_t genomic_start;
         uint32_t genomic_end;
-        uint32_t cds_index_in_translation;    // 0-based
-        uint32_t nt_offset_in_cds_start;      // 0-based offset within that CDS interval
-        uint32_t nt_offset_in_cds_end;
-        uint32_t aa_overlap_start;            // 1-based
-        uint32_t aa_overlap_end;              // 1-based
-        uint32_t cumulative_nt_start;         // 0-based across the whole CDS
+        uint32_t cds_index_in_translation;
+        uint32_t cumulative_nt_start;
         uint32_t cumulative_nt_end;
+        uint32_t aa_overlap_start;
+        uint32_t aa_overlap_end;
     };
     std::vector<Range> ranges;
     uint32_t total_protein_length_aa = 0;
@@ -66,18 +56,16 @@ DomainGenomic map_domain_to_genomic(const ProteinDomain& d,
     std::vector<uint32_t> cumulative;
     cumulative.reserve(cds_tx_order.size() + 1);
     cumulative.push_back(0);
-    for (const auto& c : cds_tx_order) {
-        cumulative.push_back(cumulative.back() + (c.end - c.start + 1));
-    }
+    for (const auto& c : cds_tx_order) cumulative.push_back(cumulative.back() + (c.end - c.start + 1));
     uint32_t total_nt = cumulative.back();
     dg.total_protein_length_aa = total_nt / 3;
 
-    // 0-based half-open in nt
+    if (!d.has_domain()) return dg;
+
     uint32_t domain_nt_start = (d.start - 1) * 3;
     uint32_t domain_nt_end = d.end * 3 - 1;
     if (domain_nt_end >= total_nt) {
-        // Domain extends beyond CDS — try to clip and still report what we can.
-        if (domain_nt_start >= total_nt) return dg; // entirely beyond
+        if (domain_nt_start >= total_nt) return dg;
         domain_nt_end = total_nt - 1;
     } else {
         dg.fully_mapped = true;
@@ -95,20 +83,12 @@ DomainGenomic map_domain_to_genomic(const ProteinDomain& d,
 
         const auto& c = cds_tx_order[i];
         uint32_t g_s, g_e;
-        if (c.strand == '-') {
-            g_s = c.end - off_e;
-            g_e = c.end - off_s;
-        } else {
-            g_s = c.start + off_s;
-            g_e = c.start + off_e;
-        }
+        if (c.strand == '-') { g_s = c.end - off_e; g_e = c.end - off_s; }
+        else                 { g_s = c.start + off_s; g_e = c.start + off_e; }
 
         DomainGenomic::Range r;
-        r.genomic_start = g_s;
-        r.genomic_end = g_e;
+        r.genomic_start = g_s; r.genomic_end = g_e;
         r.cds_index_in_translation = static_cast<uint32_t>(i);
-        r.nt_offset_in_cds_start = off_s;
-        r.nt_offset_in_cds_end = off_e;
         r.cumulative_nt_start = ovl_nt_start;
         r.cumulative_nt_end = ovl_nt_end;
         r.aa_overlap_start = ovl_nt_start / 3 + 1;
@@ -133,23 +113,16 @@ bool genomic_overlaps_any_domain_range(uint32_t s, uint32_t e,
     return found;
 }
 
-// Map a genomic [g_s,g_e] within a known CDS interval c to (cds_nt, aa) coordinates,
-// assuming CDS i in translation order with cumulative_nt_start = cum_nt_start.
 struct CdsCoord { uint32_t cds_nt_start; uint32_t cds_nt_end; uint32_t aa_start; uint32_t aa_end; };
 CdsCoord cds_genomic_to_aa(const GenomicInterval& c, uint32_t cum_nt_start,
                            uint32_t g_s, uint32_t g_e) {
     uint32_t off_s, off_e;
-    if (c.strand == '-') {
-        off_s = c.end - g_e;
-        off_e = c.end - g_s;
-    } else {
-        off_s = g_s - c.start;
-        off_e = g_e - c.start;
-    }
-    uint32_t nt_s = cum_nt_start + off_s; // 0-based
+    if (c.strand == '-') { off_s = c.end - g_e; off_e = c.end - g_s; }
+    else                 { off_s = g_s - c.start; off_e = g_e - c.start; }
+    uint32_t nt_s = cum_nt_start + off_s;
     uint32_t nt_e = cum_nt_start + off_e;
     CdsCoord cc;
-    cc.cds_nt_start = nt_s + 1; // 1-based for output
+    cc.cds_nt_start = nt_s + 1;
     cc.cds_nt_end = nt_e + 1;
     cc.aa_start = nt_s / 3 + 1;
     cc.aa_end = nt_e / 3 + 1;
@@ -171,37 +144,45 @@ ErrorCode DomainMapper::load_domains(const std::string& bed_filename) {
     }
     domains_.clear();
     std::string line;
-    size_t line_no = 0;
     while (std::getline(file, line)) {
-        ++line_no;
         if (line.empty() || line[0] == '#') continue;
         std::istringstream iss(line);
+        std::vector<std::string> cols;
+        std::string tok;
+        while (iss >> tok) cols.push_back(tok);
+        if (cols.empty()) continue;
+
         ProteinDomain d;
-        std::string col1, col2, col3, col4, col5;
-        iss >> col1 >> col2 >> col3;
-        if (col1.empty() || col2.empty() || col3.empty()) continue;
-        d.protein_id = col1;
-        try {
-            d.start = static_cast<uint32_t>(std::stoul(col2));
-            d.end = static_cast<uint32_t>(std::stoul(col3));
-        } catch (...) { continue; }
-        if (iss >> col4) d.domain_id = col4;
-        // input_id: prefer domain_id; fall back to protein:start-end so each row is identifiable.
-        if (!d.domain_id.empty()) d.input_id = d.domain_id;
-        else {
+        d.protein_id = cols[0];
+
+        // Domain coords are optional. Missing -> no-domain mode.
+        if (cols.size() >= 3) {
+            try {
+                d.start = static_cast<uint32_t>(std::stoul(cols[1]));
+                d.end   = static_cast<uint32_t>(std::stoul(cols[2]));
+            } catch (...) { d.start = 0; d.end = 0; }
+        }
+        if (cols.size() >= 4) d.domain_id = cols[3];
+
+        if (!d.domain_id.empty()) {
+            d.input_id = d.domain_id;
+        } else if (d.has_domain()) {
             std::ostringstream oss;
             oss << d.protein_id << ":" << d.start << "-" << d.end;
             d.input_id = oss.str();
+        } else {
+            d.input_id = d.protein_id;
         }
         domains_.push_back(std::move(d));
     }
-    std::cerr << "Loaded " << domains_.size() << " domains from " << bed_filename << std::endl;
+    std::cerr << "Loaded " << domains_.size() << " queries from " << bed_filename << std::endl;
     return ErrorCode::SUCCESS;
 }
 
 DomainResult DomainMapper::process_one(const ProteinDomain& d) const {
     DomainResult R;
     R.domain = d;
+    R.no_domain_mode = !d.has_domain();
 
     const auto* intervals = gtf_.get_protein_intervals(d.protein_id);
     if (!intervals || intervals->empty()) {
@@ -235,7 +216,9 @@ DomainResult DomainMapper::process_one(const ProteinDomain& d) const {
     if (gene_name.empty()) gene_name = cds_tx.front().gene_name;
 
     DomainGenomic dg = map_domain_to_genomic(d, cds_tx);
-    if (dg.ranges.empty()) {
+
+    // Unmapped if a domain was requested but didn't intersect any CDS.
+    if (d.has_domain() && dg.ranges.empty()) {
         R.unmapped.input_id = d.input_id;
         R.unmapped.protein_id = d.protein_id;
         R.unmapped.aa_start = d.start;
@@ -250,46 +233,19 @@ DomainResult DomainMapper::process_one(const ProteinDomain& d) const {
     }
 
     R.mapped = true;
-
-    // Genomic envelope (min start / max end across all coding ranges).
-    uint32_t domain_g_min = dg.ranges.front().genomic_start;
-    uint32_t domain_g_max = dg.ranges.front().genomic_end;
-    for (const auto& r : dg.ranges) {
-        domain_g_min = std::min(domain_g_min, r.genomic_start);
-        domain_g_max = std::max(domain_g_max, r.genomic_end);
-    }
-    uint32_t domain_length_nt = (d.end - d.start + 1) * 3;
-
-    // ----- coding segments -----
-    // dg.ranges is in translation order; each entry corresponds to one CDS slice.
-    {
-        uint32_t segment_idx = 0;
+    uint32_t domain_length_nt = d.has_domain() ? (d.end - d.start + 1) * 3 : 0;
+    uint32_t domain_g_min = 0, domain_g_max = 0;
+    if (!dg.ranges.empty()) {
+        domain_g_min = dg.ranges.front().genomic_start;
+        domain_g_max = dg.ranges.front().genomic_end;
         for (const auto& r : dg.ranges) {
-            ++segment_idx;
-            CodingSegmentRow row;
-            row.chrom = chrom;
-            row.genomic_start = r.genomic_start;
-            row.genomic_end = r.genomic_end;
-            row.strand = strand;
-            row.input_id = d.input_id;
-            row.protein_id = d.protein_id;
-            row.transcript_id = transcript_id;
-            row.gene_id = gene_id;
-            row.gene_name = gene_name;
-            row.domain_id = d.domain_id;
-            row.aa_start = d.start;
-            row.aa_end = d.end;
-            row.segment_index_in_domain = segment_idx;
-            row.cds_nt_start = r.cumulative_nt_start + 1;
-            row.cds_nt_end = r.cumulative_nt_end + 1;
-            row.aa_start_encoded = r.aa_overlap_start;
-            row.aa_end_encoded = r.aa_overlap_end;
-            R.coding_segments.push_back(std::move(row));
+            domain_g_min = std::min(domain_g_min, r.genomic_start);
+            domain_g_max = std::max(domain_g_max, r.genomic_end);
         }
     }
 
-    // ----- span -----
-    {
+    // ----- span (only when a domain exists and was mapped) -----
+    if (d.has_domain() && !dg.ranges.empty()) {
         SpanRow s;
         s.chrom = chrom;
         s.genomic_start = domain_g_min;
@@ -300,6 +256,7 @@ DomainResult DomainMapper::process_one(const ProteinDomain& d) const {
         s.domain_id = d.domain_id;
         s.gene_name = gene_name;
         R.span = s;
+        R.has_span = true;
     }
 
     // ----- summary -----
@@ -315,248 +272,257 @@ DomainResult DomainMapper::process_one(const ProteinDomain& d) const {
         s.strand = strand;
         s.aa_start = d.start;
         s.aa_end = d.end;
-        s.domain_length_aa = d.end - d.start + 1;
+        s.domain_length_aa = d.has_domain() ? (d.end - d.start + 1) : 0;
         s.domain_length_nt = domain_length_nt;
         s.protein_length_aa = dg.total_protein_length_aa;
         s.domain_genomic_start = domain_g_min;
         s.domain_genomic_end = domain_g_max;
         s.n_coding_segments = static_cast<uint32_t>(dg.ranges.size());
-        s.fully_mapped = dg.fully_mapped;
+        s.fully_mapped = d.has_domain() ? dg.fully_mapped : true;
+        s.no_domain_mode = !d.has_domain();
         R.summary = s;
     }
 
-    // ----- isoform structure -----
-    if (output_kind_ == OutputKind::ISOFORM || output_kind_ == OutputKind::ALL) {
-        // Pre-compute cumulative nt offsets per CDS interval (translation order).
-        std::vector<uint32_t> cum_nt(cds_tx.size() + 1, 0);
-        for (size_t i = 0; i < cds_tx.size(); ++i) {
-            cum_nt[i + 1] = cum_nt[i] + (cds_tx[i].end - cds_tx[i].start + 1);
+    // ----- isoform_structure rows -----
+    // We always build them: they back coding, introns, isoform, and (via filtering) all.
+
+    // Cumulative nt offsets per CDS in translation order.
+    std::vector<uint32_t> cum_nt(cds_tx.size() + 1, 0);
+    for (size_t i = 0; i < cds_tx.size(); ++i) cum_nt[i + 1] = cum_nt[i] + (cds_tx[i].end - cds_tx[i].start + 1);
+    // Map CDS genomic start -> translation index.
+    std::unordered_map<uint32_t, size_t> cds_start_to_tx_idx;
+    for (size_t i = 0; i < cds_tx.size(); ++i) cds_start_to_tx_idx[cds_tx[i].start] = i;
+
+    std::vector<GenomicInterval> cds_gen = cds_tx;
+    std::sort(cds_gen.begin(), cds_gen.end(),
+              [](const GenomicInterval& a, const GenomicInterval& b) { return a.start < b.start; });
+    uint32_t cds_min_g = cds_gen.front().start;
+    uint32_t cds_max_g = cds_gen.back().end;
+
+    auto classify_utr = [&](uint32_t s, uint32_t e) -> PlotFeatureType {
+        if (strand == '+') {
+            return (e < cds_min_g) ? PlotFeatureType::FIVE_PRIME_UTR
+                                   : PlotFeatureType::THREE_PRIME_UTR;
+        } else {
+            return (e < cds_min_g) ? PlotFeatureType::THREE_PRIME_UTR
+                                   : PlotFeatureType::FIVE_PRIME_UTR;
         }
-        // Lookup: genomic CDS interval -> index in translation order.
-        // Key by start coord (CDS regions don't overlap within a transcript).
-        std::unordered_map<uint32_t, size_t> cds_start_to_tx_idx;
-        for (size_t i = 0; i < cds_tx.size(); ++i) cds_start_to_tx_idx[cds_tx[i].start] = i;
+    };
 
-        // CDS in genomic order.
-        std::vector<GenomicInterval> cds_gen = cds_tx;
-        std::sort(cds_gen.begin(), cds_gen.end(),
-                  [](const GenomicInterval& a, const GenomicInterval& b) { return a.start < b.start; });
-        uint32_t cds_min_g = cds_gen.front().start;
-        uint32_t cds_max_g = cds_gen.back().end;
+    // Initial rows in genomic order: introns between exons, then UTR/CDS within each exon.
+    std::vector<IsoformSegmentRow> rows;
+    rows.reserve(exons.size() * 3);
 
-        // Build raw segments in genomic order: introns between exons, then UTR/CDS within each exon.
-        std::vector<IsoformSegmentRow> rows;
-        rows.reserve(exons.size() * 3);
-
-        auto classify_utr = [&](uint32_t s, uint32_t e) -> PlotFeatureType {
-            // Region s..e is wholly outside CDS span by construction (caller ensures this).
-            if (strand == '+') {
-                return (e < cds_min_g) ? PlotFeatureType::FIVE_PRIME_UTR
-                                       : PlotFeatureType::THREE_PRIME_UTR;
-            } else {
-                return (e < cds_min_g) ? PlotFeatureType::THREE_PRIME_UTR
-                                       : PlotFeatureType::FIVE_PRIME_UTR;
-            }
-        };
-
-        for (size_t ei = 0; ei < exons.size(); ++ei) {
-            // Intron before this exon (between previous exon and this one).
-            if (ei > 0) {
-                const auto& prev = exons[ei - 1];
-                const auto& cur = exons[ei];
-                if (prev.end + 1 <= cur.start - 1) {
-                    IsoformSegmentRow ir;
-                    ir.chrom = chrom;
-                    ir.strand = strand;
-                    ir.feature_type = PlotFeatureType::INTRON;
-                    ir.feature_genomic_start = prev.end + 1;
-                    ir.feature_genomic_end = cur.start - 1;
-                    ir.feature_length_nt = ir.feature_genomic_end - ir.feature_genomic_start + 1;
-                    ir.has_cds_coords = false;
-                    rows.push_back(std::move(ir));
-                }
-            }
-
-            const auto& exon = exons[ei];
-            // CDS slices that overlap this exon, sorted by genomic start.
-            std::vector<const GenomicInterval*> covering;
-            for (const auto& c : cds_gen) {
-                if (intervals_overlap(c.start, c.end, exon.start, exon.end)) covering.push_back(&c);
-            }
-            std::sort(covering.begin(), covering.end(),
-                      [](const GenomicInterval* a, const GenomicInterval* b) { return a->start < b->start; });
-
-            uint32_t cursor = exon.start;
-            for (const auto* cp : covering) {
-                uint32_t cs = std::max(cp->start, exon.start);
-                uint32_t ce = std::min(cp->end, exon.end);
-                if (cursor < cs) {
-                    // UTR slice [cursor, cs-1]
-                    IsoformSegmentRow ir;
-                    ir.chrom = chrom;
-                    ir.strand = strand;
-                    ir.exon_number = exon.exon_number;
-                    ir.feature_genomic_start = cursor;
-                    ir.feature_genomic_end = cs - 1;
-                    ir.feature_length_nt = ir.feature_genomic_end - ir.feature_genomic_start + 1;
-                    ir.feature_type = classify_utr(ir.feature_genomic_start, ir.feature_genomic_end);
-                    ir.has_cds_coords = false;
-                    rows.push_back(std::move(ir));
-                }
-                {
-                    IsoformSegmentRow ir;
-                    ir.chrom = chrom;
-                    ir.strand = strand;
-                    ir.exon_number = exon.exon_number;
-                    ir.feature_type = PlotFeatureType::CDS;
-                    ir.feature_genomic_start = cs;
-                    ir.feature_genomic_end = ce;
-                    ir.feature_length_nt = ce - cs + 1;
-                    ir.has_cds_coords = true;
-                    auto it = cds_start_to_tx_idx.find(cp->start);
-                    if (it != cds_start_to_tx_idx.end()) {
-                        size_t tx_i = it->second;
-                        CdsCoord cc = cds_genomic_to_aa(cds_tx[tx_i], cum_nt[tx_i], cs, ce);
-                        ir.cds_nt_start = cc.cds_nt_start;
-                        ir.cds_nt_end = cc.cds_nt_end;
-                        ir.aa_start_encoded = cc.aa_start;
-                        ir.aa_end_encoded = cc.aa_end;
-                    }
-                    rows.push_back(std::move(ir));
-                }
-                cursor = ce + 1;
-            }
-            if (cursor <= exon.end) {
+    for (size_t ei = 0; ei < exons.size(); ++ei) {
+        if (ei > 0) {
+            const auto& prev = exons[ei - 1];
+            const auto& cur = exons[ei];
+            if (prev.end + 1 <= cur.start - 1) {
                 IsoformSegmentRow ir;
-                ir.chrom = chrom;
-                ir.strand = strand;
-                ir.exon_number = exon.exon_number;
-                ir.feature_genomic_start = cursor;
-                ir.feature_genomic_end = exon.end;
+                ir.chrom = chrom; ir.strand = strand;
+                ir.feature_type = PlotFeatureType::INTRON;
+                ir.feature_genomic_start = prev.end + 1;
+                ir.feature_genomic_end = cur.start - 1;
                 ir.feature_length_nt = ir.feature_genomic_end - ir.feature_genomic_start + 1;
-                ir.feature_type = classify_utr(ir.feature_genomic_start, ir.feature_genomic_end);
-                ir.has_cds_coords = false;
                 rows.push_back(std::move(ir));
             }
         }
+        const auto& exon = exons[ei];
+        std::vector<const GenomicInterval*> covering;
+        for (const auto& c : cds_gen) {
+            if (intervals_overlap(c.start, c.end, exon.start, exon.end)) covering.push_back(&c);
+        }
+        std::sort(covering.begin(), covering.end(),
+                  [](const GenomicInterval* a, const GenomicInterval* b) { return a->start < b->start; });
 
-        // Annotate domain overlap, fill orderings + plot_group + identity columns.
-        // Need split-CDS rows for partial domain overlap. Walk and, for any CDS row
-        // that overlaps the domain partially, split into up to three rows.
-        std::vector<IsoformSegmentRow> rows2;
-        rows2.reserve(rows.size() * 2);
-        for (auto& ir : rows) {
-            if (ir.feature_type != PlotFeatureType::CDS) {
-                rows2.push_back(std::move(ir));
-                continue;
+        uint32_t cursor = exon.start;
+        for (const auto* cp : covering) {
+            uint32_t cs = std::max(cp->start, exon.start);
+            uint32_t ce = std::min(cp->end, exon.end);
+            if (cursor < cs) {
+                IsoformSegmentRow ir;
+                ir.chrom = chrom; ir.strand = strand;
+                ir.exon_number = exon.exon_number;
+                ir.feature_genomic_start = cursor;
+                ir.feature_genomic_end = cs - 1;
+                ir.feature_length_nt = ir.feature_genomic_end - ir.feature_genomic_start + 1;
+                ir.feature_type = classify_utr(ir.feature_genomic_start, ir.feature_genomic_end);
+                rows.push_back(std::move(ir));
             }
-            // Split CDS by overlap with any dg.ranges.
-            uint32_t ovl_s = 0, ovl_e = 0;
-            bool any = genomic_overlaps_any_domain_range(ir.feature_genomic_start, ir.feature_genomic_end,
-                                                        dg.ranges, ovl_s, ovl_e);
-            if (!any) { rows2.push_back(std::move(ir)); continue; }
-            // Build up to 3 rows: [start, ovl_s-1] no-overlap, [ovl_s, ovl_e] overlap, [ovl_e+1, end] no-overlap.
-            auto make_cds_row = [&](uint32_t s, uint32_t e) {
-                IsoformSegmentRow nr = ir;
-                nr.feature_genomic_start = s;
-                nr.feature_genomic_end = e;
-                nr.feature_length_nt = e - s + 1;
-                // Recompute CDS coords for this slice.
-                size_t tx_i = 0;
-                for (size_t i = 0; i < cds_tx.size(); ++i) {
-                    if (cds_tx[i].start <= s && e <= cds_tx[i].end) { tx_i = i; break; }
+            {
+                IsoformSegmentRow ir;
+                ir.chrom = chrom; ir.strand = strand;
+                ir.exon_number = exon.exon_number;
+                ir.feature_type = PlotFeatureType::CDS;
+                ir.feature_genomic_start = cs;
+                ir.feature_genomic_end = ce;
+                ir.feature_length_nt = ce - cs + 1;
+                ir.has_cds_coords = true;
+                auto it = cds_start_to_tx_idx.find(cp->start);
+                if (it != cds_start_to_tx_idx.end()) {
+                    size_t tx_i = it->second;
+                    ir.source_cds_index = static_cast<uint32_t>(tx_i);
+                    CdsCoord cc = cds_genomic_to_aa(cds_tx[tx_i], cum_nt[tx_i], cs, ce);
+                    ir.cds_nt_start = cc.cds_nt_start;
+                    ir.cds_nt_end = cc.cds_nt_end;
+                    ir.aa_start_encoded = cc.aa_start;
+                    ir.aa_end_encoded = cc.aa_end;
                 }
-                CdsCoord cc = cds_genomic_to_aa(cds_tx[tx_i], cum_nt[tx_i], s, e);
-                nr.cds_nt_start = cc.cds_nt_start;
-                nr.cds_nt_end = cc.cds_nt_end;
-                nr.aa_start_encoded = cc.aa_start;
-                nr.aa_end_encoded = cc.aa_end;
-                nr.has_cds_coords = true;
-                return nr;
-            };
-            if (ir.feature_genomic_start < ovl_s) rows2.push_back(make_cds_row(ir.feature_genomic_start, ovl_s - 1));
-            rows2.push_back(make_cds_row(ovl_s, ovl_e));
-            if (ovl_e < ir.feature_genomic_end) rows2.push_back(make_cds_row(ovl_e + 1, ir.feature_genomic_end));
+                rows.push_back(std::move(ir));
+            }
+            cursor = ce + 1;
         }
-
-        // Annotate ordering and overlap classification.
-        uint32_t ord_g = 0;
-        for (auto& ir : rows2) ir.feature_order_genomic = ++ord_g;
-
-        // Translation order: + strand same as genomic, - strand reversed.
-        if (strand == '-') {
-            uint32_t n = static_cast<uint32_t>(rows2.size());
-            for (auto& ir : rows2) ir.feature_order_transcript = n - ir.feature_order_genomic + 1;
-        } else {
-            for (auto& ir : rows2) ir.feature_order_transcript = ir.feature_order_genomic;
+        if (cursor <= exon.end) {
+            IsoformSegmentRow ir;
+            ir.chrom = chrom; ir.strand = strand;
+            ir.exon_number = exon.exon_number;
+            ir.feature_genomic_start = cursor;
+            ir.feature_genomic_end = exon.end;
+            ir.feature_length_nt = ir.feature_genomic_end - ir.feature_genomic_start + 1;
+            ir.feature_type = classify_utr(ir.feature_genomic_start, ir.feature_genomic_end);
+            rows.push_back(std::move(ir));
         }
+    }
 
-        // Per-feature counters (CDS_1, intron_1, ...) numbered in translation order.
-        // Build lookup of rows sorted by transcript order, assign numeric ids per feature_type.
+    // Split CDS rows where the domain partially overlaps.
+    std::vector<IsoformSegmentRow> rows2;
+    rows2.reserve(rows.size() * 2);
+    for (auto& ir : rows) {
+        if (ir.feature_type != PlotFeatureType::CDS || !d.has_domain()) {
+            rows2.push_back(std::move(ir));
+            continue;
+        }
+        uint32_t ovl_s = 0, ovl_e = 0;
+        bool any = genomic_overlaps_any_domain_range(ir.feature_genomic_start, ir.feature_genomic_end,
+                                                    dg.ranges, ovl_s, ovl_e);
+        if (!any) { rows2.push_back(std::move(ir)); continue; }
+        auto make_cds_row = [&](uint32_t s, uint32_t e) {
+            IsoformSegmentRow nr = ir;
+            nr.feature_genomic_start = s;
+            nr.feature_genomic_end = e;
+            nr.feature_length_nt = e - s + 1;
+            size_t tx_i = ir.source_cds_index;
+            CdsCoord cc = cds_genomic_to_aa(cds_tx[tx_i], cum_nt[tx_i], s, e);
+            nr.cds_nt_start = cc.cds_nt_start;
+            nr.cds_nt_end = cc.cds_nt_end;
+            nr.aa_start_encoded = cc.aa_start;
+            nr.aa_end_encoded = cc.aa_end;
+            nr.has_cds_coords = true;
+            return nr;
+        };
+        if (ir.feature_genomic_start < ovl_s) rows2.push_back(make_cds_row(ir.feature_genomic_start, ovl_s - 1));
+        rows2.push_back(make_cds_row(ovl_s, ovl_e));
+        if (ovl_e < ir.feature_genomic_end) rows2.push_back(make_cds_row(ovl_e + 1, ir.feature_genomic_end));
+    }
+
+    // Genomic ordering.
+    uint32_t ord_g = 0;
+    for (auto& ir : rows2) ir.feature_order_genomic = ++ord_g;
+    if (strand == '-') {
+        uint32_t n = static_cast<uint32_t>(rows2.size());
+        for (auto& ir : rows2) ir.feature_order_transcript = n - ir.feature_order_genomic + 1;
+    } else {
+        for (auto& ir : rows2) ir.feature_order_transcript = ir.feature_order_genomic;
+    }
+
+    // Assign feature_id and feature_part.
+    //   CDS:    feature_id = "CDS_<source_cds_index+1>" (stable across splits)
+    //           feature_part = 1..K within rows sharing the same source_cds_index,
+    //                           in translation order (= order_transcript ascending).
+    //   UTR:    numbered separately per UTR kind, in translation order
+    //   intron: numbered in translation order
+    {
+        // Index of rows by translation order.
         std::vector<size_t> idx(rows2.size());
         for (size_t i = 0; i < idx.size(); ++i) idx[i] = i;
         std::sort(idx.begin(), idx.end(),
                   [&](size_t a, size_t b) {
                       return rows2[a].feature_order_transcript < rows2[b].feature_order_transcript;
                   });
-        std::unordered_map<int, uint32_t> per_type_counter;
+
+        std::unordered_map<int, uint32_t> per_utr_counter;       // by PlotFeatureType
+        uint32_t intron_counter = 0;
+        // For CDS: source_cds_index -> running part counter
+        std::unordered_map<uint32_t, uint32_t> cds_part_counter;
+
         for (size_t k : idx) {
-            int key = static_cast<int>(rows2[k].feature_type);
-            uint32_t n = ++per_type_counter[key];
-            rows2[k].feature_id = plot_feature_to_string(rows2[k].feature_type) + "_" + std::to_string(n);
-        }
-
-        // Domain overlap classification + coordinates.
-        for (auto& ir : rows2) {
-            ir.input_id = d.input_id;
-            ir.gene_id = gene_id;
-            ir.gene_name = gene_name;
-            ir.transcript_id = transcript_id;
-            ir.protein_id = d.protein_id;
-            ir.domain_id = d.domain_id;
-
-            if (ir.feature_type == PlotFeatureType::CDS) {
-                uint32_t ovl_s = 0, ovl_e = 0;
-                bool any = genomic_overlaps_any_domain_range(ir.feature_genomic_start, ir.feature_genomic_end,
-                                                            dg.ranges, ovl_s, ovl_e);
-                if (any) {
-                    ir.overlap = DomainOverlapKind::CODING_OVERLAP;
-                    ir.has_overlap_coords = true;
-                    ir.domain_overlap_genomic_start = ovl_s;
-                    ir.domain_overlap_genomic_end = ovl_e;
-                    // CDS-relative coords for the overlap slice.
-                    size_t tx_i = 0;
-                    for (size_t i = 0; i < cds_tx.size(); ++i) {
-                        if (cds_tx[i].start <= ovl_s && ovl_e <= cds_tx[i].end) { tx_i = i; break; }
-                    }
-                    CdsCoord cc = cds_genomic_to_aa(cds_tx[tx_i], cum_nt[tx_i], ovl_s, ovl_e);
-                    ir.domain_overlap_cds_nt_start = cc.cds_nt_start;
-                    ir.domain_overlap_cds_nt_end = cc.cds_nt_end;
-                    ir.domain_overlap_aa_start = cc.aa_start;
-                    ir.domain_overlap_aa_end = cc.aa_end;
-                    double feat_len = static_cast<double>(ir.feature_length_nt);
-                    double ovl_len = static_cast<double>(ovl_e - ovl_s + 1);
-                    ir.domain_overlap_fraction_of_feature = feat_len > 0 ? ovl_len / feat_len : 0.0;
-                    ir.domain_overlap_fraction_of_domain = domain_length_nt > 0
-                        ? ovl_len / static_cast<double>(domain_length_nt) : 0.0;
-                } else {
-                    ir.overlap = DomainOverlapKind::NO;
+            auto& r = rows2[k];
+            switch (r.feature_type) {
+                case PlotFeatureType::CDS: {
+                    r.feature_id = "CDS_" + std::to_string(r.source_cds_index + 1);
+                    r.feature_part = ++cds_part_counter[r.source_cds_index];
+                    break;
                 }
-            } else if (ir.feature_type == PlotFeatureType::INTRON) {
-                if (ir.feature_genomic_start >= domain_g_min && ir.feature_genomic_end <= domain_g_max) {
-                    ir.overlap = DomainOverlapKind::INSIDE_DOMAIN_GENOMIC_SPAN;
-                } else {
-                    ir.overlap = DomainOverlapKind::NO;
+                case PlotFeatureType::INTRON: {
+                    ++intron_counter;
+                    r.feature_id = "intron_" + std::to_string(intron_counter);
+                    r.feature_part = 1;
+                    break;
                 }
-            } else {
-                ir.overlap = DomainOverlapKind::NO;
+                case PlotFeatureType::FIVE_PRIME_UTR:
+                case PlotFeatureType::THREE_PRIME_UTR: {
+                    int key = static_cast<int>(r.feature_type);
+                    uint32_t n = ++per_utr_counter[key];
+                    r.feature_id = plot_feature_to_string(r.feature_type) + "_" + std::to_string(n);
+                    r.feature_part = 1;
+                    break;
+                }
             }
-            ir.plot_group = plot_group_for(ir.feature_type, ir.overlap);
         }
-
-        R.isoform_segments = std::move(rows2);
     }
 
+    // Identity + overlap classification + plot_group.
+    for (auto& r : rows2) {
+        r.input_id = d.input_id;
+        r.gene_id = gene_id;
+        r.gene_name = gene_name;
+        r.transcript_id = transcript_id;
+        r.protein_id = d.protein_id;
+        r.domain_id = d.domain_id;
+        r.no_domain_mode = !d.has_domain();
+
+        if (!d.has_domain()) {
+            r.overlap = DomainOverlapKind::NO;
+            r.has_overlap_coords = false;
+            // plot_group: just the feature type, no domain coloring.
+            r.plot_group = plot_feature_to_string(r.feature_type);
+            continue;
+        }
+
+        if (r.feature_type == PlotFeatureType::CDS) {
+            uint32_t ovl_s = 0, ovl_e = 0;
+            bool any = genomic_overlaps_any_domain_range(r.feature_genomic_start, r.feature_genomic_end,
+                                                        dg.ranges, ovl_s, ovl_e);
+            if (any) {
+                r.overlap = DomainOverlapKind::CODING_OVERLAP;
+                r.has_overlap_coords = true;
+                r.domain_overlap_genomic_start = ovl_s;
+                r.domain_overlap_genomic_end = ovl_e;
+                size_t tx_i = r.source_cds_index;
+                CdsCoord cc = cds_genomic_to_aa(cds_tx[tx_i], cum_nt[tx_i], ovl_s, ovl_e);
+                r.domain_overlap_cds_nt_start = cc.cds_nt_start;
+                r.domain_overlap_cds_nt_end = cc.cds_nt_end;
+                r.domain_overlap_aa_start = cc.aa_start;
+                r.domain_overlap_aa_end = cc.aa_end;
+                double feat_len = static_cast<double>(r.feature_length_nt);
+                double ovl_len = static_cast<double>(ovl_e - ovl_s + 1);
+                r.domain_overlap_fraction_of_feature = feat_len > 0 ? ovl_len / feat_len : 0.0;
+                r.domain_overlap_fraction_of_domain = domain_length_nt > 0
+                    ? ovl_len / static_cast<double>(domain_length_nt) : 0.0;
+            } else {
+                r.overlap = DomainOverlapKind::NO;
+            }
+        } else if (r.feature_type == PlotFeatureType::INTRON) {
+            r.overlap = (r.feature_genomic_start >= domain_g_min && r.feature_genomic_end <= domain_g_max)
+                ? DomainOverlapKind::INSIDE_DOMAIN_GENOMIC_SPAN
+                : DomainOverlapKind::NO;
+        } else {
+            r.overlap = DomainOverlapKind::NO;
+        }
+        r.plot_group = plot_group_for(r.feature_type, r.overlap);
+    }
+
+    R.isoform_segments = std::move(rows2);
     return R;
 }
 
@@ -564,20 +530,18 @@ ErrorCode DomainMapper::process_domains() {
     results_.clear();
     results_.resize(domains_.size());
     auto t0 = std::chrono::high_resolution_clock::now();
-
 #ifdef USE_OPENMP
     #pragma omp parallel for schedule(dynamic, 64)
 #endif
     for (size_t i = 0; i < domains_.size(); ++i) {
         results_[i] = process_one(domains_[i]);
     }
-
     auto t1 = std::chrono::high_resolution_clock::now();
     auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(t1 - t0).count();
     size_t mapped = 0, unmapped = 0;
     for (const auto& r : results_) (r.mapped ? mapped : unmapped)++;
     std::cerr << "Mapped " << mapped << "/" << domains_.size()
-              << " domains (" << unmapped << " unmapped) in " << ms << "ms" << std::endl;
+              << " queries (" << unmapped << " unmapped) in " << ms << "ms" << std::endl;
     return ErrorCode::SUCCESS;
 }
 

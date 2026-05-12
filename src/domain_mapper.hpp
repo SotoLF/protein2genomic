@@ -5,39 +5,17 @@
 #include "gtf_parser.hpp"
 
 struct ProteinDomain {
-    std::string input_id;        // user-supplied row identifier (BED column 4 if present, else auto)
-    std::string protein_id;
-    uint32_t start;              // 1-based aa
-    uint32_t end;                // 1-based aa, inclusive
-    std::string domain_id;       // semantic name (BED column 5 if present)
-
-    ProteinDomain() : start(0), end(0) {}
-};
-
-// One row per CDS segment that *codes* part of the domain.
-// Backs domain_cds_segments.bed and .tsv.
-struct CodingSegmentRow {
-    std::string chrom;
-    uint32_t genomic_start;      // 1-based, inclusive
-    uint32_t genomic_end;        // 1-based, inclusive
-    char strand;
     std::string input_id;
     std::string protein_id;
-    std::string transcript_id;
-    std::string gene_id;
-    std::string gene_name;
+    uint32_t start;              // 1-based aa; 0 means "no domain"
+    uint32_t end;                // 1-based aa, inclusive
     std::string domain_id;
-    uint32_t aa_start;           // domain aa range
-    uint32_t aa_end;
-    uint32_t segment_index_in_domain; // 1..N across the domain (in translation order)
-    uint32_t cds_nt_start;       // domain-relative nt offsets, 1-based
-    uint32_t cds_nt_end;
-    uint32_t aa_start_encoded;
-    uint32_t aa_end_encoded;
+
+    ProteinDomain() : start(0), end(0) {}
+    bool has_domain() const { return start != 0 && end != 0; }
 };
 
 // One row per input domain capturing the full genomic envelope (incl. introns).
-// Backs domain_span_with_introns.bed.
 struct SpanRow {
     std::string chrom;
     uint32_t genomic_start;
@@ -49,9 +27,9 @@ struct SpanRow {
     std::string gene_name;
 };
 
-// One row per structural feature of the transcript (UTR/CDS/intron),
-// split so that domain-overlapping vs non-overlapping CDS are separate rows.
-// Backs isoform_structure.tsv.
+// One row per structural feature of the transcript.
+// CDS that overlap the domain partially are split into multiple rows that
+// SHARE the same feature_id and differ by feature_part.
 struct IsoformSegmentRow {
     std::string input_id;
     std::string gene_id;
@@ -64,15 +42,16 @@ struct IsoformSegmentRow {
     char strand;
 
     PlotFeatureType feature_type;
-    std::string feature_id;       // five_prime_UTR_1, CDS_1, intron_1, ...
-    uint32_t exon_number;         // 0 for introns
+    std::string feature_id;       // e.g. CDS_3 — stable across splits of the same GTF CDS
+    uint32_t feature_part;        // 1..K when CDS is split by overlap; else 1
+    uint32_t source_cds_index;    // 0-based index in translation order (CDS only); 0 for UTR/intron
+    uint32_t exon_number;         // 0 -> NA
     uint32_t feature_genomic_start;
     uint32_t feature_genomic_end;
     uint32_t feature_length_nt;
     uint32_t feature_order_genomic;
     uint32_t feature_order_transcript;
 
-    // CDS-only nucleotide/aa ranges; UTR/intron rows leave these as 0 (printed as NA).
     bool has_cds_coords;
     uint32_t cds_nt_start;
     uint32_t cds_nt_end;
@@ -90,10 +69,12 @@ struct IsoformSegmentRow {
     double domain_overlap_fraction_of_feature;
     double domain_overlap_fraction_of_domain;
 
+    bool no_domain_mode;          // true when the input row has no domain at all
     std::string plot_group;
 
     IsoformSegmentRow()
-        : strand('+'), feature_type(PlotFeatureType::CDS), exon_number(0),
+        : strand('+'), feature_type(PlotFeatureType::CDS),
+          feature_part(1), source_cds_index(0), exon_number(0),
           feature_genomic_start(0), feature_genomic_end(0), feature_length_nt(0),
           feature_order_genomic(0), feature_order_transcript(0),
           has_cds_coords(false), cds_nt_start(0), cds_nt_end(0),
@@ -103,10 +84,10 @@ struct IsoformSegmentRow {
           domain_overlap_cds_nt_start(0), domain_overlap_cds_nt_end(0),
           domain_overlap_aa_start(0), domain_overlap_aa_end(0),
           domain_overlap_fraction_of_feature(0.0),
-          domain_overlap_fraction_of_domain(0.0) {}
+          domain_overlap_fraction_of_domain(0.0),
+          no_domain_mode(false) {}
 };
 
-// One row per input domain — successful or partial.
 struct MappingSummaryRow {
     std::string input_id;
     std::string protein_id;
@@ -116,7 +97,7 @@ struct MappingSummaryRow {
     std::string domain_id;
     std::string chrom;
     char strand;
-    uint32_t aa_start;
+    uint32_t aa_start;            // 0 => no_domain
     uint32_t aa_end;
     uint32_t domain_length_aa;
     uint32_t domain_length_nt;
@@ -125,6 +106,7 @@ struct MappingSummaryRow {
     uint32_t domain_genomic_end;
     uint32_t n_coding_segments;
     bool fully_mapped;
+    bool no_domain_mode;
 };
 
 struct UnmappedDomainRow {
@@ -136,18 +118,18 @@ struct UnmappedDomainRow {
     std::string reason;
 };
 
-// Per-domain result bundle, computed once and consumed by the writers.
 struct DomainResult {
     ProteinDomain domain;
     bool mapped;
+    bool no_domain_mode;
     UnmappedDomainRow unmapped;
 
     MappingSummaryRow summary;
-    std::vector<CodingSegmentRow> coding_segments;
     SpanRow span;
+    bool has_span;
     std::vector<IsoformSegmentRow> isoform_segments;
 
-    DomainResult() : mapped(false) {}
+    DomainResult() : mapped(false), no_domain_mode(false), has_span(false) {}
 };
 
 class DomainMapper {
