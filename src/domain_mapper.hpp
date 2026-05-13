@@ -38,6 +38,12 @@ struct IsoformSegmentRow {
     std::string protein_id;
     std::string domain_id;
 
+    // Transcript-level flags (same value on every row of the same query).
+    TriBool is_mane_select = TriBool::NA;
+    TriBool is_ensembl_canonical = TriBool::NA;
+    bool cds_length_mismatch = false;
+    uint8_t cds_nt_remainder = 0; // 0, 1 or 2
+
     std::string chrom;
     char strand;
 
@@ -90,7 +96,7 @@ struct IsoformSegmentRow {
 
 struct MappingSummaryRow {
     std::string input_id;
-    std::string protein_id;
+    std::string protein_id;       // "" => no protein for this transcript
     std::string transcript_id;
     std::string gene_id;
     std::string gene_name;
@@ -107,6 +113,15 @@ struct MappingSummaryRow {
     uint32_t n_coding_segments;
     bool fully_mapped;
     bool no_domain_mode;
+
+    // New in v2.2: transcript-level flags & CDS-mismatch.
+    TriBool is_mane_select = TriBool::NA;
+    TriBool is_ensembl_canonical = TriBool::NA;
+    bool cds_length_mismatch = false;
+    uint8_t cds_nt_remainder = 0;     // 0, 1 or 2
+    // "ENSP" if the input id matched a protein, "ENST" if it matched a
+    // transcript directly. Written to summary so users can audit.
+    std::string input_id_type;        // "ENSP" | "ENST" | ""
 };
 
 struct UnmappedDomainRow {

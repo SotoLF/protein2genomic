@@ -51,6 +51,7 @@ std::string output_kind_to_string(OutputKind k) {
         case OutputKind::INTRONS: return "introns";
         case OutputKind::SPAN:    return "span";
         case OutputKind::ISOFORM: return "isoform";
+        case OutputKind::BED12:   return "bed12";
         case OutputKind::ALL:     return "all";
     }
     return "unknown";
@@ -58,7 +59,11 @@ std::string output_kind_to_string(OutputKind k) {
 
 std::string bed_name(const DomainResult& r) {
     std::ostringstream oss;
-    oss << r.domain.protein_id;
+    // Prefer the resolved protein id (set in summary) so ENST queries still
+    // get a meaningful name; fall back to the raw input.
+    const std::string& pid = r.summary.protein_id.empty()
+        ? r.domain.protein_id : r.summary.protein_id;
+    oss << pid;
     if (!r.domain.domain_id.empty()) oss << "_" << r.domain.domain_id;
     if (r.domain.has_domain()) oss << "_" << r.domain.start << "-" << r.domain.end;
     else oss << "_no_domain";
@@ -68,13 +73,18 @@ std::string bed_name(const DomainResult& r) {
 ErrorCode write_summary(const std::string& path, const std::vector<DomainResult>& results) {
     std::ofstream f(path);
     if (!f.is_open()) return ErrorCode::FILE_NOT_FOUND;
+    // Existing columns are unchanged in order; new columns are appended at the
+    // end so consumers that read by index still work.
     f << "input_id\tprotein_id\ttranscript_id\tgene_id\tgene_name\tdomain_id\tchrom\tstrand\t"
          "aa_start\taa_end\tdomain_length_aa\tdomain_length_nt\tprotein_length_aa\t"
-         "domain_genomic_start\tdomain_genomic_end\tn_coding_segments\tfully_mapped\tno_domain_mode\tstatus\n";
+         "domain_genomic_start\tdomain_genomic_end\tn_coding_segments\tfully_mapped\tno_domain_mode\t"
+         "input_id_type\tis_mane_select\tis_ensembl_canonical\t"
+         "cds_length_mismatch\tcds_nt_remainder\tstatus\n";
     for (const auto& r : results) {
         if (!r.mapped) {
-            f << r.domain.input_id << "\t" << r.domain.protein_id
-              << "\tNA\tNA\tNA\t";
+            f << r.domain.input_id << "\t";
+            w_str_or_na(f, r.domain.protein_id);
+            f << "\tNA\tNA\tNA\t";
             w_str_or_na(f, r.domain.domain_id);
             f << "\tNA\tNA\t";
             if (r.domain.has_domain()) {
@@ -86,11 +96,14 @@ ErrorCode write_summary(const std::string& path, const std::vector<DomainResult>
             }
             f << "\tNA\tNA\tNA\t0\tfalse\t"
               << (r.no_domain_mode ? "true" : "false")
+              << "\tNA\tNA\tNA\tNA\tNA"
               << "\t" << r.unmapped.reason << "\n";
             continue;
         }
         const auto& s = r.summary;
-        f << s.input_id << "\t" << s.protein_id << "\t" << s.transcript_id << "\t";
+        f << s.input_id << "\t";
+        w_str_or_na(f, s.protein_id);
+        f << "\t" << s.transcript_id << "\t";
         w_str_or_na(f, s.gene_id);
         f << "\t"; w_str_or_na(f, s.gene_name);
         f << "\t"; w_str_or_na(f, s.domain_id);
@@ -111,8 +124,21 @@ ErrorCode write_summary(const std::string& path, const std::vector<DomainResult>
         }
         f << "\t" << (s.fully_mapped ? "true" : "false")
           << "\t" << (s.no_domain_mode ? "true" : "false")
-          << "\t" << (s.no_domain_mode ? "structure_only" : (s.fully_mapped ? "ok" : "partial"))
-          << "\n";
+          << "\t"; w_str_or_na(f, s.input_id_type);
+        f << "\t" << tribool_to_string(s.is_mane_select)
+          << "\t" << tribool_to_string(s.is_ensembl_canonical)
+          << "\t" << (s.cds_length_mismatch ? "true" : "false")
+          << "\t" << static_cast<int>(s.cds_nt_remainder)
+          << "\t";
+        // Status string. ok / partial get a _cds_mismatch suffix when relevant.
+        const char* base = s.no_domain_mode ? "structure_only"
+                                             : (s.fully_mapped ? "ok" : "partial");
+        if (s.cds_length_mismatch && !s.no_domain_mode) {
+            f << base << "_cds_mismatch";
+        } else {
+            f << base;
+        }
+        f << "\n";
     }
     std::cerr << "Wrote " << path << std::endl;
     return ErrorCode::SUCCESS;
@@ -121,6 +147,7 @@ ErrorCode write_summary(const std::string& path, const std::vector<DomainResult>
 // Header + columns shared by isoform_structure.tsv, domain_cds_segments.tsv, domain_introns.tsv.
 const char* kFeatureTsvHeader =
 "input_id\tgene_id\tgene_name\ttranscript_id\tprotein_id\tdomain_id\t"
+"is_mane_select\tis_ensembl_canonical\tcds_length_mismatch\tcds_nt_remainder\t"
 "chrom\tstrand\tfeature_type\tfeature_id\tfeature_part\texon_number\t"
 "feature_genomic_start\tfeature_genomic_end\tfeature_length_nt\t"
 "feature_order_genomic\tfeature_order_transcript\t"
@@ -137,8 +164,12 @@ void write_feature_tsv_row(std::ofstream& f, const IsoformSegmentRow& s) {
     w_str_or_na(f, s.gene_id); f << "\t";
     w_str_or_na(f, s.gene_name); f << "\t";
     w_str_or_na(f, s.transcript_id); f << "\t";
-    f << s.protein_id << "\t";
-    w_str_or_na(f, s.domain_id); f << "\t";
+    w_str_or_na(f, s.protein_id); f << "\t";
+    w_str_or_na(f, s.domain_id); f << "\t"
+      << tribool_to_string(s.is_mane_select) << "\t"
+      << tribool_to_string(s.is_ensembl_canonical) << "\t"
+      << (s.cds_length_mismatch ? "true" : "false") << "\t"
+      << static_cast<int>(s.cds_nt_remainder) << "\t";
     f << s.chrom << "\t" << s.strand << "\t"
       << plot_feature_to_string(s.feature_type) << "\t"
       << s.feature_id << "\t"
@@ -245,6 +276,53 @@ ErrorCode write_introns_bed(const std::string& path, const std::vector<DomainRes
     return ErrorCode::SUCCESS;
 }
 
+// BED12 with one row per domain. chromStart..chromEnd is the genomic envelope
+// of the domain (introns included). The blocks are the CDS slices that code
+// the domain (overlap_kind == CODING_OVERLAP). thickStart=chromStart,
+// thickEnd=chromEnd so IGV draws the whole feature thick. Empty in no-domain
+// mode. Block lists are ordered by genomic start as BED12 requires.
+ErrorCode write_bed12(const std::string& path, const std::vector<DomainResult>& results) {
+    std::ofstream f(path);
+    if (!f.is_open()) return ErrorCode::FILE_NOT_FOUND;
+    for (const auto& r : results) {
+        if (!r.mapped || r.no_domain_mode || !r.has_span) continue;
+        // Collect coding-overlap CDS slices in genomic order.
+        std::vector<std::pair<uint32_t, uint32_t>> blocks; // 1-based [s,e]
+        for (const auto& s : r.isoform_segments) {
+            if (s.feature_type != PlotFeatureType::CDS) continue;
+            if (s.overlap != DomainOverlapKind::CODING_OVERLAP) continue;
+            // Only the domain-overlapping sub-slice of this CDS row.
+            if (!s.has_overlap_coords) continue;
+            blocks.emplace_back(s.domain_overlap_genomic_start,
+                                s.domain_overlap_genomic_end);
+        }
+        if (blocks.empty()) continue;
+        std::sort(blocks.begin(), blocks.end());
+
+        uint32_t chrom_start = r.span.genomic_start - 1; // 0-based
+        uint32_t chrom_end   = r.span.genomic_end;       // half-open
+        std::string name = bed_name(r);
+        f << r.span.chrom << "\t" << chrom_start << "\t" << chrom_end << "\t"
+          << name << "\t0\t" << r.span.strand << "\t"
+          << chrom_start << "\t" << chrom_end << "\t"
+          << "255,0,0\t" << blocks.size() << "\t";
+        // blockSizes
+        for (size_t i = 0; i < blocks.size(); ++i) {
+            if (i) f << ",";
+            f << (blocks[i].second - blocks[i].first + 1);
+        }
+        f << ",\t";
+        // blockStarts (offset from chromStart)
+        for (size_t i = 0; i < blocks.size(); ++i) {
+            if (i) f << ",";
+            f << (blocks[i].first - 1 - chrom_start);
+        }
+        f << ",\n";
+    }
+    std::cerr << "Wrote " << path << std::endl;
+    return ErrorCode::SUCCESS;
+}
+
 ErrorCode write_span_bed(const std::string& path, const std::vector<DomainResult>& results) {
     std::ofstream f(path);
     if (!f.is_open()) return ErrorCode::FILE_NOT_FOUND;
@@ -294,7 +372,7 @@ ErrorCode write_metadata(const std::string& path,
     }
     f << "{\n";
     f << "  \"tool\": \"protein2genomic\",\n";
-    f << "  \"version\": \"2.1.0\",\n";
+    f << "  \"version\": \"2.2.0\",\n";
     f << "  \"timestamp_utc\": \"" << iso8601_now() << "\",\n";
     f << "  \"output_kind\": \"" << output_kind_to_string(kind) << "\",\n";
     f << "  \"annotation_source\": \"" << source << "\",\n";
@@ -356,6 +434,10 @@ ErrorCode write_all(const std::string& out_dir,
     }
     if (kind == OutputKind::ISOFORM || kind == OutputKind::ALL) {
         rc = write_isoform_tsv(join(out_dir, "isoform_structure.tsv"), results);
+        if (rc != ErrorCode::SUCCESS) return rc;
+    }
+    if (kind == OutputKind::BED12 || kind == OutputKind::ALL) {
+        rc = write_bed12(join(out_dir, "domain_blocks.bed12"), results);
         if (rc != ErrorCode::SUCCESS) return rc;
     }
 

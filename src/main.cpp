@@ -35,16 +35,17 @@ void print_usage(const char* program_name) {
 << "  Mapping inputs (required):\n"
 << "    --bed FILE       Query file (TSV/BED-like). See BED INPUT FORMAT.\n"
 << "                     Rows can be:\n"
-<< "                       protein_id  aa_start  aa_end  [domain_id]\n"
+<< "                       id  aa_start  aa_end  [domain_id]\n"
 << "                     or, for whole-transcript structure with no domain:\n"
-<< "                       protein_id\n"
+<< "                       id\n"
+<< "                     `id` can be an ENSP (protein) or ENST (transcript).\n"
 << "    --out-dir DIR    Output directory (created if missing).\n"
 << "    --gtf FILE       GTF annotation, parsed on the fly.\n"
 << "    --index FILE     Pre-built binary index (faster, recommended).\n"
 << "                     Use --gtf or --index, not both.\n"
 << "\n"
 << "  Output selection:\n"
-<< "    --output KIND    One of {coding, introns, span, isoform, all}.\n"
+<< "    --output KIND    One of {coding, introns, span, isoform, bed12, all}.\n"
 << "                     Default: all. See OUTPUT MODES below.\n"
 << "\n"
 << "  Index management:\n"
@@ -93,8 +94,17 @@ void print_usage(const char* program_name) {
 << "    Plot-ready. CDS rows that the domain partially covers are split, sharing\n"
 << "    the same feature_id with different feature_part.\n"
 << "\n"
+<< "  --output bed12\n"
+<< "    One BED12 row per domain, ready to drop into IGV / UCSC.\n"
+<< "    Files written:\n"
+<< "      domain_blocks.bed12   chromStart..chromEnd is the genomic envelope\n"
+<< "                            of the domain (introns included). Blocks are the\n"
+<< "                            CDS slices that code the domain. thickStart and\n"
+<< "                            thickEnd equal chromStart/chromEnd so the entire\n"
+<< "                            feature is drawn thick. itemRgb defaults to red.\n"
+<< "\n"
 << "  --output all\n"
-<< "    Writes coding + introns + span + isoform + run_metadata.json.\n"
+<< "    Writes coding + introns + span + isoform + bed12 + run_metadata.json.\n"
 << "\n"
 << "  Every mode also writes:\n"
 << "    domain_mapping_summary.tsv   one row per input query (success or partial)\n"
@@ -212,16 +222,20 @@ void print_usage(const char* program_name) {
 << "\n"
 << "BED INPUT FORMAT\n"
 << "  Whitespace-separated. Lines starting with '#' are comments.\n"
-<< "    column 1   protein_id (with or without version suffix)\n"
+<< "    column 1   id: ENSP (protein) or ENST (transcript), with or without\n"
+<< "               version suffix. ENST and ENSP that point to the same\n"
+<< "               transcript produce identical mapping output.\n"
 << "    column 2   aa_start (1-based inclusive). Optional.\n"
 << "    column 3   aa_end   (1-based inclusive). Optional.\n"
 << "    column 4   domain_id (optional, used as input_id)\n"
 << "    column 5+  ignored\n"
 << "  No-domain mode: rows with only column 1, or with aa_start = aa_end = 0,\n"
 << "  are processed for whole-transcript structure (overlap columns are NA).\n"
-<< "  protein_id versions are stripped on both sides, so a BED with\n"
-<< "  ENSP00000269305.4 will resolve against an index built from a GTF\n"
-<< "  with ENSP00000269305 (and vice versa).\n"
+<< "  Versions are stripped on both sides, so a BED with\n"
+<< "  ENSP00000269305.4 (or ENST00000269305.9) will resolve against an index\n"
+<< "  built from a GTF with unversioned ids (and vice versa).\n"
+<< "  Non-coding ENST queries surface as 'no_CDS_for_protein' in\n"
+<< "  unmapped_domains.tsv.\n"
 << "\n"
 << "EXAMPLES\n"
 << "  Build the index once:\n"
@@ -244,7 +258,7 @@ void print_usage(const char* program_name) {
 }
 
 void print_version() {
-    std::cout << "Protein2Genomic 2.0.0 (index format v" << INDEX_FORMAT_VERSION << ")\n";
+    std::cout << "Protein2Genomic 2.2.0 (index format v" << INDEX_FORMAT_VERSION << ")\n";
 }
 
 bool parse_output_kind(const std::string& s, OutputKind& out) {
@@ -252,6 +266,7 @@ bool parse_output_kind(const std::string& s, OutputKind& out) {
     if (s == "introns") { out = OutputKind::INTRONS; return true; }
     if (s == "span")    { out = OutputKind::SPAN;    return true; }
     if (s == "isoform") { out = OutputKind::ISOFORM; return true; }
+    if (s == "bed12")   { out = OutputKind::BED12;   return true; }
     if (s == "all")     { out = OutputKind::ALL;     return true; }
     return false;
 }
@@ -279,7 +294,8 @@ int parse_arguments(int argc, char* argv[], Config& config) {
             case 'O': config.out_dir = optarg; break;
             case 'o': {
                 if (!parse_output_kind(optarg, config.output_kind)) {
-                    std::cerr << "Error: --output must be one of {coding,span,isoform,all}\n";
+                    std::cerr << "Error: --output must be one of "
+                                 "{coding,introns,span,isoform,bed12,all}\n";
                     return 1;
                 }
                 break;

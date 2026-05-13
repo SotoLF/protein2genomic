@@ -1,0 +1,36 @@
+#!/usr/bin/env bash
+# Top-level entry point for the protein2genomic toolkit.
+#
+#   protein2genomic plot ...   -> python plotter (python/protein2genomic_plot/plot.py)
+#   protein2genomic <other>... -> the C++ binary that does the mapping
+#
+# The C++ binary is discovered in this order:
+#   1. $PROTEIN2GENOMIC_BIN  (explicit override)
+#   2. <repo>/build/protein2genomic (development build, where CMake places it)
+#   3. PATH lookup for `protein2genomic-core` (installed sibling)
+#
+set -euo pipefail
+
+here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+repo_root="$(cd "$here/.." && pwd)"
+
+if [[ "${1:-}" == "plot" ]]; then
+    shift
+    export PYTHONPATH="$repo_root/python${PYTHONPATH:+:$PYTHONPATH}"
+    exec python3 -m protein2genomic_plot.plot "$@"
+fi
+
+binary="${PROTEIN2GENOMIC_BIN:-}"
+if [[ -z "$binary" ]]; then
+    if [[ -x "$repo_root/build/protein2genomic" ]]; then
+        binary="$repo_root/build/protein2genomic"
+    elif command -v protein2genomic-core >/dev/null 2>&1; then
+        binary="$(command -v protein2genomic-core)"
+    else
+        echo "error: could not locate the protein2genomic C++ binary. Build it with:" >&2
+        echo "  cd \"$repo_root\" && mkdir -p build && cd build && cmake .. && make -j" >&2
+        echo "or set PROTEIN2GENOMIC_BIN to its path." >&2
+        exit 127
+    fi
+fi
+exec "$binary" "$@"

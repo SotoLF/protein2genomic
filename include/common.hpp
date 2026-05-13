@@ -42,14 +42,32 @@ enum class FeaturePriority {
 };
 
 // What the user wants the package to produce.
-// Selected via --output {coding,span,isoform,all}.
+// Selected via --output {coding,introns,span,isoform,bed12,all}.
 enum class OutputKind {
     CODING,    // domain_cds_segments.{bed,tsv} — ALL CDS rows + overlap column
     INTRONS,   // domain_introns.{bed,tsv}     — ALL intron rows + overlap column
     SPAN,      // domain_span_with_introns.bed — single envelope row per domain
     ISOFORM,   // isoform_structure.tsv         — UTR/CDS/intron, plot-ready
+    BED12,     // domain_blocks.bed12          — one BED12 per domain, IGV-ready
     ALL        // everything plus summary + unmapped + run_metadata
 };
+
+// Tri-state for transcript-level flags that may be unknown if the GTF doesn't
+// carry tag attributes at all (e.g. plain Ensembl base GTF). We emit NA in
+// that case rather than silently writing `false`.
+enum class TriBool : uint8_t {
+    NA   = 0,
+    TRUE_ = 1,
+    FALSE_ = 2
+};
+inline const char* tribool_to_string(TriBool b) {
+    switch (b) {
+        case TriBool::TRUE_:  return "true";
+        case TriBool::FALSE_: return "false";
+        case TriBool::NA:
+        default:              return "NA";
+    }
+}
 
 // Plot-ready feature kind for isoform_structure.tsv.
 // This is *derived* from GTF EXON/CDS intersections, not raw GTF features.
@@ -72,10 +90,11 @@ constexpr size_t INITIAL_INTERVAL_CAPACITY = 200000;
 constexpr size_t READ_BUFFER_SIZE = 1024 * 1024;
 constexpr size_t MAX_LINE_LENGTH = 8192;
 
-// Bumped because the index now stores exons + gene_name.
-// Old (v1) indices will be rejected with an explicit "rebuild" message.
+// v3: added transcript->protein reverse map, MANE_Select / Ensembl_canonical
+// tags per transcript, gtf_has_tags flag, cds_total_nt per protein. Old (v1/v2)
+// indices will be rejected with an explicit "rebuild" message.
 constexpr uint32_t INDEX_FORMAT_MAGIC = 0x50324738; // "P2G8"
-constexpr uint32_t INDEX_FORMAT_VERSION = 2;
+constexpr uint32_t INDEX_FORMAT_VERSION = 3;
 
 enum class ErrorCode {
     SUCCESS = 0,

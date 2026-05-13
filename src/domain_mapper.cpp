@@ -184,7 +184,50 @@ DomainResult DomainMapper::process_one(const ProteinDomain& d) const {
     R.domain = d;
     R.no_domain_mode = !d.has_domain();
 
-    const auto* intervals = gtf_.get_protein_intervals(d.protein_id);
+    // The BED's "protein_id" field can in fact be an ENSP or an ENST. Try the
+    // protein index first; if the id starts with ENST or simply isn't found
+    // there, try the transcript index. We also strip the version on both
+    // sides (GENCODE → Ensembl interop).
+    const std::vector<GenomicInterval>* intervals = nullptr;
+    std::string resolved_protein_id = d.protein_id; // may be cleared for non-coding ENST
+    std::string resolved_transcript_id;
+    std::string input_id_type;
+
+    auto looks_like_transcript = [](const std::string& id) {
+        // ENST/ENSMUSTxxx style. Accept both versioned and unversioned. We
+        // explicitly check the protein prefix first so a user can still pass
+        // anything else (e.g. legacy CCDS ids that happen to live in the
+        // protein index).
+        if (id.rfind("ENSP", 0) == 0) return false;
+        if (id.find("ENST") != std::string::npos) return true;
+        return false;
+    };
+
+    auto strip_version = [](std::string& id) {
+        size_t dot = id.find('.');
+        if (dot != std::string::npos) id.resize(dot);
+    };
+
+    if (!looks_like_transcript(d.protein_id)) {
+        intervals = gtf_.get_protein_intervals(d.protein_id);
+        if (intervals && !intervals->empty()) {
+            input_id_type = "ENSP";
+            strip_version(resolved_protein_id);
+            const std::string* tx = gtf_.get_transcript_id(d.protein_id);
+            if (tx) resolved_transcript_id = *tx;
+        }
+    }
+    if (!intervals || intervals->empty()) {
+        std::string mapped_protein;
+        intervals = gtf_.get_transcript_intervals(d.protein_id, &mapped_protein);
+        if (intervals && !intervals->empty()) {
+            input_id_type = "ENST";
+            resolved_transcript_id = d.protein_id;
+            strip_version(resolved_transcript_id);
+            resolved_protein_id = mapped_protein; // already unversioned in index
+        }
+    }
+
     if (!intervals || intervals->empty()) {
         R.unmapped.input_id = d.input_id;
         R.unmapped.protein_id = d.protein_id;
@@ -199,7 +242,7 @@ DomainResult DomainMapper::process_one(const ProteinDomain& d) const {
     auto exons = exons_in_genomic_order(*intervals);
     if (cds_tx.empty()) {
         R.unmapped.input_id = d.input_id;
-        R.unmapped.protein_id = d.protein_id;
+        R.unmapped.protein_id = resolved_protein_id;
         R.unmapped.aa_start = d.start;
         R.unmapped.aa_end = d.end;
         R.unmapped.domain_id = d.domain_id;
@@ -209,18 +252,39 @@ DomainResult DomainMapper::process_one(const ProteinDomain& d) const {
 
     char strand = cds_tx.front().strand;
     std::string chrom = cds_tx.front().chromosome;
-    std::string transcript_id = cds_tx.front().transcript_id;
-    std::string gene_id = gtf_.get_gene_id(d.protein_id);
+    std::string transcript_id = resolved_transcript_id.empty()
+        ? cds_tx.front().transcript_id : resolved_transcript_id;
+    std::string gene_id = !resolved_protein_id.empty()
+        ? gtf_.get_gene_id(resolved_protein_id)
+        : gtf_.get_gene_id_by_tx(transcript_id);
     if (gene_id.empty()) gene_id = cds_tx.front().gene_id;
-    std::string gene_name = gtf_.get_gene_name(d.protein_id);
+    std::string gene_name = !resolved_protein_id.empty()
+        ? gtf_.get_gene_name(resolved_protein_id)
+        : gtf_.get_gene_name_by_tx(transcript_id);
     if (gene_name.empty()) gene_name = cds_tx.front().gene_name;
+
+    // Transcript-level flags + CDS mismatch.
+    TriBool is_mane = gtf_.is_mane_select(transcript_id);
+    TriBool is_canon = gtf_.is_ensembl_canonical(transcript_id);
+    uint32_t cds_total_nt = !resolved_protein_id.empty()
+        ? gtf_.cds_total_nt_for_protein(resolved_protein_id) : 0u;
+    if (cds_total_nt == 0) {
+        // Fallback: compute on the fly from this transcript's CDS intervals.
+        uint64_t sum = 0;
+        for (const auto& iv : *intervals) {
+            if (iv.feature_type == FeatureType::CDS) sum += (iv.end - iv.start + 1);
+        }
+        cds_total_nt = static_cast<uint32_t>(sum);
+    }
+    uint8_t cds_remainder = static_cast<uint8_t>(cds_total_nt % 3);
+    bool cds_mismatch = (cds_remainder != 0);
 
     DomainGenomic dg = map_domain_to_genomic(d, cds_tx);
 
     // Unmapped if a domain was requested but didn't intersect any CDS.
     if (d.has_domain() && dg.ranges.empty()) {
         R.unmapped.input_id = d.input_id;
-        R.unmapped.protein_id = d.protein_id;
+        R.unmapped.protein_id = resolved_protein_id;
         R.unmapped.aa_start = d.start;
         R.unmapped.aa_end = d.end;
         R.unmapped.domain_id = d.domain_id;
@@ -252,7 +316,7 @@ DomainResult DomainMapper::process_one(const ProteinDomain& d) const {
         s.genomic_end = domain_g_max;
         s.strand = strand;
         s.input_id = d.input_id;
-        s.protein_id = d.protein_id;
+        s.protein_id = resolved_protein_id;
         s.domain_id = d.domain_id;
         s.gene_name = gene_name;
         R.span = s;
@@ -263,7 +327,7 @@ DomainResult DomainMapper::process_one(const ProteinDomain& d) const {
     {
         MappingSummaryRow s;
         s.input_id = d.input_id;
-        s.protein_id = d.protein_id;
+        s.protein_id = resolved_protein_id;
         s.transcript_id = transcript_id;
         s.gene_id = gene_id;
         s.gene_name = gene_name;
@@ -280,6 +344,11 @@ DomainResult DomainMapper::process_one(const ProteinDomain& d) const {
         s.n_coding_segments = static_cast<uint32_t>(dg.ranges.size());
         s.fully_mapped = d.has_domain() ? dg.fully_mapped : true;
         s.no_domain_mode = !d.has_domain();
+        s.is_mane_select = is_mane;
+        s.is_ensembl_canonical = is_canon;
+        s.cds_length_mismatch = cds_mismatch;
+        s.cds_nt_remainder = cds_remainder;
+        s.input_id_type = input_id_type;
         R.summary = s;
     }
 
@@ -477,9 +546,13 @@ DomainResult DomainMapper::process_one(const ProteinDomain& d) const {
         r.gene_id = gene_id;
         r.gene_name = gene_name;
         r.transcript_id = transcript_id;
-        r.protein_id = d.protein_id;
+        r.protein_id = resolved_protein_id;
         r.domain_id = d.domain_id;
         r.no_domain_mode = !d.has_domain();
+        r.is_mane_select = is_mane;
+        r.is_ensembl_canonical = is_canon;
+        r.cds_length_mismatch = cds_mismatch;
+        r.cds_nt_remainder = cds_remainder;
 
         if (!d.has_domain()) {
             r.overlap = DomainOverlapKind::NO;

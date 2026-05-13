@@ -1,0 +1,26 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "protein2genomic-plot"
+version = "2.2.0"
+description = "Plotting backend for the protein2genomic mapper."
+readme = "../README.md"
+requires-python = ">=3.8"
+authors = [{ name = "protein2genomic contributors" }]
+license = { text = "MIT" }
+dependencies = [
+    "matplotlib>=3.5",
+]
+
+[project.optional-dependencies]
+html = ["plotly>=5.0"]
+
+[project.scripts]
+# Direct python entry-point. The repo's bash wrapper `bin/protein2genomic`
+# remains the unified CLI; this is for users who only want the plotter.
+"protein2genomic-plot" = "protein2genomic_plot.plot:main"
+
+[tool.setuptools]
+packages = ["protein2genomic_plot"]

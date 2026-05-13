@@ -1,0 +1,8 @@
+#!genome-build synthetic_p2g_test_no_tags
+chrA	p2g_test	transcript	100	400	.	+	0	gene_id "ENSG7"; transcript_id "ENST7"; gene_type "protein_coding"; gene_name "TEST7"; transcript_type "protein_coding"; protein_id "ENSP7";
+chrA	p2g_test	exon	100	149	.	+	0	gene_id "ENSG7"; transcript_id "ENST7"; gene_name "TEST7"; transcript_type "protein_coding"; exon_number "1"; exon_id "ENST7_E1"; protein_id "ENSP7";
+chrA	p2g_test	exon	200	250	.	+	0	gene_id "ENSG7"; transcript_id "ENST7"; gene_name "TEST7"; transcript_type "protein_coding"; exon_number "2"; exon_id "ENST7_E2"; protein_id "ENSP7";
+chrA	p2g_test	exon	300	400	.	+	0	gene_id "ENSG7"; transcript_id "ENST7"; gene_name "TEST7"; transcript_type "protein_coding"; exon_number "3"; exon_id "ENST7_E3"; protein_id "ENSP7";
+chrA	p2g_test	CDS	120	149	.	+	0	gene_id "ENSG7"; transcript_id "ENST7"; gene_name "TEST7"; transcript_type "protein_coding"; exon_number "1"; protein_id "ENSP7";
+chrA	p2g_test	CDS	200	250	.	+	0	gene_id "ENSG7"; transcript_id "ENST7"; gene_name "TEST7"; transcript_type "protein_coding"; exon_number "2"; protein_id "ENSP7";
+chrA	p2g_test	CDS	300	350	.	+	0	gene_id "ENSG7"; transcript_id "ENST7"; gene_name "TEST7"; transcript_type "protein_coding"; exon_number "3"; protein_id "ENSP7";
