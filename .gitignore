@@ -10,10 +10,10 @@ Makefile
 *.so
 *.dylib
 
-# Binaries (in-source / installed). The shell wrapper at bin/protein2genomic
+# Binaries (in-source / installed). The shell wrapper at bin/prot2exon
 # is a checked-in source file and must NOT be ignored.
-protein2genomic
-!bin/protein2genomic
+prot2exon
+!bin/prot2exon
 
 # Editor/system
 *.log

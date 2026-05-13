@@ -24,7 +24,7 @@ struct Config {
 
 void print_usage(const char* program_name) {
     std::cout
-<< "Protein2Genomic - map protein domain coordinates to genomic / transcript\n"
+<< "prot2exon - map protein domain coordinates to genomic / transcript\n"
 << "structure using a GTF annotation.\n"
 << "\n"
 << "USAGE\n"
@@ -258,7 +258,7 @@ void print_usage(const char* program_name) {
 }
 
 void print_version() {
-    std::cout << "Protein2Genomic 2.2.0 (index format v" << INDEX_FORMAT_VERSION << ")\n";
+    std::cout << "prot2exon 2.2.0 (index format v" << INDEX_FORMAT_VERSION << ")\n";
 }
 
 bool parse_output_kind(const std::string& s, OutputKind& out) {

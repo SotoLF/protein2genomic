@@ -1,4 +1,4 @@
-# Protein2Genomic
+# Prot2Exon
 
 Map protein domain coordinates to genomic / transcript structure using a GTF annotation.
 
@@ -10,6 +10,8 @@ For each input query (a `protein_id` **or** a `transcript_id`, and, optionally, 
 The two questions correspond to different output modes (`coding`, `introns`, `span`, `isoform`, `bed12`, `all`). Each mode emits every feature of its type (e.g. every CDS or every intron of the transcript) together with a column that says which ones overlap the domain. The companion BED / BED12 is the subset that actually overlaps with the domain.
 
 A separate `plot` subcommand renders `isoform_structure.tsv` to PDF/PNG/SVG (matplotlib) or to an interactive HTML page (plotly).
+
+> **Don't have a BED of aa ranges yet?** [scripts/](scripts/) converts InterProScan TSV, UniProt feature tables (`.dat` or REST JSON), and HMMER Pfam `--domtblout` into the BED-like format this tool eats — including the UniProt-accession → ENSP step.
 
 A row that has only a `protein_id` (no aa range) is processed as *whole-transcript structure with no domain* — overlap columns are `NA` and the BED subsets are empty for that row. This makes it easy to plot a protein's transcript architecture even before any domain annotation exists.
 
@@ -33,10 +35,11 @@ A row that has only a `protein_id` (no aa range) is processed as *whole-transcri
    - [unmapped_domains.tsv](#unmapped_domainstsv)
    - [run_metadata.json](#run_metadatajson)
 7. [Worked example](#worked-example)
-8. [Plotting](#plotting)
-9. [Benchmarks](#benchmarks)
-10. [GTF compatibility & index](#gtf-compatibility--index)
-11. [CLI reference](#cli-reference)
+8. [Python API](#python-api)
+9. [Plotting](#plotting)
+10. [Benchmarks](#benchmarks)
+11. [GTF compatibility & index](#gtf-compatibility--index)
+12. [CLI reference](#cli-reference)
 
 ---
 
@@ -50,17 +53,17 @@ cmake -DCMAKE_BUILD_TYPE=Release ..
 make -j$(nproc)
 ```
 
-The binary is produced at `build/protein2genomic`.
+The binary is produced at `build/prot2exon`.
 
 ## Quickstart
 
 ```bash
 # 1. Build a binary index from a GTF (one-time per annotation)
-./protein2genomic --gtf gencode.v49.primary_assembly.annotation.gtf \
+./prot2exon --gtf gencode.v49.primary_assembly.annotation.gtf \
                   --build-index --index human.idx
 
 # 2. Map a BED of domain queries using that index
-./protein2genomic --index human.idx \
+./prot2exon --index human.idx \
                   --bed domains.bed \
                   --out-dir results \
                   --output all
@@ -476,23 +479,101 @@ The binary index format is versioned (`INDEX_FORMAT_VERSION = 3`); loading an ol
 
 ---
 
+## Python API
+
+`prot2exon` ships a Python wrapper that drives the C++ binary as a subprocess and reads the resulting TSVs back as pandas DataFrames. The C++ binary remains the source of truth for every mapping decision — Python only assembles BED rows, runs the binary, and parses the outputs.
+
+```python
+import prot2exon as p2e
+
+# Reuse the same index across many calls
+mapper = p2e.Mapper(index="human.idx")
+
+# Single query
+result = mapper.map("ENSP00000269305", aa_start=10, aa_end=50, domain_id="AD1")
+result.summary      # pd.DataFrame, one row per query
+result.isoform      # plot-ready table
+result.cds_segments # only the CDS rows
+result.introns
+result.bed12        # IGV-ready BED12
+result.unmapped     # only the failures
+
+# ENST works too (resolves to the same intervals as the matching ENSP)
+mapper.map("ENST00000269305", aa_start=10, aa_end=50, domain_id="AD1")
+
+# Batch (a single binary invocation, much cheaper than many .map() calls)
+queries = [
+    {"protein_id": "ENSP00000269305", "aa_start": 10, "aa_end": 50, "domain_id": "AD1"},
+    {"protein_id": "ENST00000303562", "aa_start": 5,  "aa_end": 100, "domain_id": "RD1"},
+    {"protein_id": "ENSP00000418960"},  # no aa range -> structure_only
+]
+batch = mapper.map_batch(queries)
+batch.n_total, batch.n_mapped, batch.n_unmapped
+
+# Slice a batch result to a single query
+just_rd1 = batch.by_input_id("RD1")
+
+# Plot directly from a result, or from a DataFrame, or from a path
+p2e.plot(result, out="AD1.pdf")
+p2e.plot(batch.isoform, input_id="RD1", out="RD1.pdf")
+p2e.plot("results/isoform_structure.tsv", input_id="AD1", out="AD1.pdf")
+
+# Plot every query (multipage PDF if `.pdf`)
+p2e.plot_all(batch, out="all_queries.pdf")
+
+# One-shot — no Mapper instance needed
+result = p2e.map_query("ENSP00000269305", 10, 50, "AD1", index="human.idx")
+
+# Persist outputs on disk instead of using a tempdir
+result = mapper.map("ENSP00000269305", 10, 50, "AD1",
+                    keep_outputs="my_results")
+# Same files the CLI would write:
+#   my_results/{domain_mapping_summary.tsv, isoform_structure.tsv, ...}
+
+# Read an existing output directory back into a MappingResult
+result = p2e.read_results_dir("my_results")
+```
+
+### Binary discovery
+
+`Mapper(index=...)` finds the C++ binary by checking, in order:
+
+1. The `binary=` constructor argument.
+2. `$PROT2EXON_BIN`.
+3. `<repo>/build/prot2exon` (development).
+4. `<repo>/bin/prot2exon` (the shell wrapper).
+5. `prot2exon-core` on PATH, then `prot2exon` on PATH.
+
+For installed users, ship the compiled binary on PATH or set `PROT2EXON_BIN`.
+
+### Install
+
+```bash
+# From the repo (development mode)
+pip install -e python/
+
+# Or from a wheel built via `python -m build python/`
+```
+
+Dependencies: `pandas>=1.4`, `matplotlib>=3.5`. Optional `plotly>=5.0` for the interactive HTML output (`p2e.plot(..., html=...)`).
+
 ## Plotting
 
-`protein2genomic plot` renders `isoform_structure.tsv` to a publication-ready figure. Run after mapping:
+`prot2exon plot` renders `isoform_structure.tsv` to a publication-ready figure. Run after mapping:
 
 ```bash
 # One domain to PDF
-protein2genomic plot \
+prot2exon plot \
     --isoform results/isoform_structure.tsv \
     --input-id RD1 --out RD1.pdf
 
 # Every input_id in the TSV to a multipage PDF
-protein2genomic plot \
+prot2exon plot \
     --isoform results/isoform_structure.tsv \
     --all --out queries.pdf
 
 # Interactive HTML (requires plotly: pip install plotly)
-protein2genomic plot \
+prot2exon plot \
     --isoform results/isoform_structure.tsv \
     --input-id RD1 --html RD1.html
 ```
@@ -517,9 +598,9 @@ The plot reads the TSV directly — it doesn't re-derive coordinates from the ge
 
 ```
 USAGE
-  protein2genomic --gtf FILE --build-index --index FILE
-  protein2genomic (--gtf FILE | --index FILE) --bed FILE --out-dir DIR [--output KIND]
-  protein2genomic plot --isoform FILE (--input-id ID | --all) [--out F] [--html F]
+  prot2exon --gtf FILE --build-index --index FILE
+  prot2exon (--gtf FILE | --index FILE) --bed FILE --out-dir DIR [--output KIND]
+  prot2exon plot --isoform FILE (--input-id ID | --all) [--out F] [--html F]
 
 OPTIONS
   --bed FILE       Query file (TSV/BED-like). Rows can be:
@@ -538,7 +619,7 @@ OPTIONS
   --help           Full help including all output schemas.
 ```
 
-Run `protein2genomic --help` for the full schema reference at the terminal.
+Run `prot2exon --help` for the full schema reference at the terminal.
 
 ## License
 

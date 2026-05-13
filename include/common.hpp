@@ -93,7 +93,9 @@ constexpr size_t MAX_LINE_LENGTH = 8192;
 // v3: added transcript->protein reverse map, MANE_Select / Ensembl_canonical
 // tags per transcript, gtf_has_tags flag, cds_total_nt per protein. Old (v1/v2)
 // indices will be rejected with an explicit "rebuild" message.
-constexpr uint32_t INDEX_FORMAT_MAGIC = 0x50324738; // "P2G8"
+// Magic is "P2E8" (project renamed prot2exon, May 2026). Indices built under
+// the old "P2G8" magic must be rebuilt.
+constexpr uint32_t INDEX_FORMAT_MAGIC = 0x50324538; // "P2E8"
 constexpr uint32_t INDEX_FORMAT_VERSION = 3;
 
 enum class ErrorCode {

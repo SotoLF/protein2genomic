@@ -371,7 +371,7 @@ ErrorCode write_metadata(const std::string& path,
         if (r.no_domain_mode) ++no_domain;
     }
     f << "{\n";
-    f << "  \"tool\": \"protein2genomic\",\n";
+    f << "  \"tool\": \"prot2exon\",\n";
     f << "  \"version\": \"2.2.0\",\n";
     f << "  \"timestamp_utc\": \"" << iso8601_now() << "\",\n";
     f << "  \"output_kind\": \"" << output_kind_to_string(kind) << "\",\n";

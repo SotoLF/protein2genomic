@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""End-to-end test suite for protein2genomic.
+"""End-to-end test suite for prot2exon.
 
 Builds the synthetic GTFs via make_synthetic_gtf.py, builds an index, runs
 several BED queries through the C++ binary, and asserts on the produced
@@ -22,8 +22,8 @@ import tempfile
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
-BIN = REPO_ROOT / "build" / "protein2genomic"
-WRAPPER = REPO_ROOT / "bin" / "protein2genomic"
+BIN = REPO_ROOT / "build" / "prot2exon"
+WRAPPER = REPO_ROOT / "bin" / "prot2exon"
 TESTS_DIR = Path(__file__).resolve().parent
 
 WITH_TAGS_GTF = TESTS_DIR / "with_tags.gtf"
@@ -249,7 +249,7 @@ ENSP99\t1\t10\tQ11_NOTFOUND
     q8_line = [l for l in bed12 if "Q8_SPLIT12" in l][0].split("\t")
     assert_eq("Q8 BED12 blockCount", "2", q8_line[9])
 
-    # ---- Plotter smoke test ----------------------------------------------
+    # ---- Plotter smoke test (CLI) ----------------------------------------
     pdf = work / "Q1.pdf"
     proc = subprocess.run(
         [str(WRAPPER), "plot", "--isoform", str(out / "isoform_structure.tsv"),
@@ -258,6 +258,52 @@ ENSP99\t1\t10\tQ11_NOTFOUND
     )
     assert_eq("plot exit 0", 0, proc.returncode)
     assert_true("PDF created", pdf.exists() and pdf.stat().st_size > 0)
+
+    # ---- Python wrapper API ---------------------------------------------
+    # Exercise the high-level Python API end-to-end against the with-tags
+    # synthetic index. Mirrors the user-facing examples in the README.
+    sys.path.insert(0, str(REPO_ROOT / "python"))
+    import prot2exon as p2e
+    mapper = p2e.Mapper(index=str(idx))
+    assert_eq("Mapper.binary points at our build", str(BIN), mapper.binary)
+
+    py_result = mapper.map("ENSP1", aa_start=1, aa_end=10, domain_id="PY_AD1")
+    assert_eq("Mapper.map: n_mapped", 1, py_result.n_mapped)
+    assert_eq("Mapper.map: gene_name", "TEST1",
+              str(py_result.summary.iloc[0]["gene_name"]))
+    assert_eq("Mapper.map: bed12 row count", 1, len(py_result.bed12))
+
+    py_batch = mapper.map_batch([
+        {"protein_id": "ENSP1", "aa_start": 1, "aa_end": 10, "domain_id": "PY_AD1"},
+        {"protein_id": "ENST1", "aa_start": 1, "aa_end": 10, "domain_id": "PY_AD1_E"},
+        {"protein_id": "ENSP4", "aa_start": 2, "aa_end": 2, "domain_id": "PY_SPLIT"},
+    ])
+    assert_eq("map_batch: n_total", 3, py_batch.n_total)
+    assert_eq("map_batch: n_mapped", 3, py_batch.n_mapped)
+
+    # keep_outputs persists the files and read_results_dir round-trips them.
+    persist_dir = work / "py_persist"
+    p2e.Mapper(index=str(idx)).map(
+        "ENSP1", 1, 10, "PY_PERSIST",
+        keep_outputs=str(persist_dir))
+    assert_true("keep_outputs: files on disk",
+                (persist_dir / "domain_mapping_summary.tsv").exists())
+    re_read = p2e.read_results_dir(str(persist_dir))
+    assert_eq("read_results_dir: mapped count", 1, re_read.n_mapped)
+    assert_eq("read_results_dir: metadata tool", "prot2exon",
+              re_read.metadata.get("tool", ""))
+
+    # Python plot() with a MappingResult and with a DataFrame both produce
+    # a PDF. We just check the file is non-empty; the visual content is
+    # the CLI test's responsibility.
+    py_pdf = work / "py_plot.pdf"
+    p2e.plot(py_result, out=str(py_pdf))
+    assert_true("py plot from MappingResult",
+                py_pdf.exists() and py_pdf.stat().st_size > 0)
+    py_pdf2 = work / "py_plot2.pdf"
+    p2e.plot(py_batch.isoform, input_id="PY_SPLIT", out=str(py_pdf2))
+    assert_true("py plot from DataFrame",
+                py_pdf2.exists() and py_pdf2.stat().st_size > 0)
 
     # ---- Wrap up ---------------------------------------------------------
     print(f"\n{len(PASSED)} passed, {len(FAILED)} failed")

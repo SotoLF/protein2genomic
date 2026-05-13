@@ -3,24 +3,27 @@ requires = ["setuptools>=61"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "protein2genomic-plot"
+name = "prot2exon"
 version = "2.2.0"
-description = "Plotting backend for the protein2genomic mapper."
+description = "Python client + plotter for the prot2exon C++ mapper."
 readme = "../README.md"
-requires-python = ">=3.8"
-authors = [{ name = "protein2genomic contributors" }]
+requires-python = ">=3.9"
+authors = [{ name = "prot2exon contributors" }]
 license = { text = "MIT" }
 dependencies = [
+    "pandas>=1.4",
     "matplotlib>=3.5",
 ]
 
 [project.optional-dependencies]
+# Interactive HTML output (plot --html / p2e.plot(..., html=...))
 html = ["plotly>=5.0"]
 
 [project.scripts]
-# Direct python entry-point. The repo's bash wrapper `bin/protein2genomic`
-# remains the unified CLI; this is for users who only want the plotter.
-"protein2genomic-plot" = "protein2genomic_plot.plot:main"
+# Direct Python entry-point for the plotter. The repo's bash wrapper
+# `bin/prot2exon` remains the unified CLI; this is for users who only want
+# the plotter without going through the wrapper.
+"prot2exon-plot" = "prot2exon.plot:main"
 
 [tool.setuptools]
-packages = ["protein2genomic_plot"]
+packages = ["prot2exon"]

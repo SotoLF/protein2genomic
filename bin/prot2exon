@@ -1,0 +1,36 @@
+#!/usr/bin/env bash
+# Top-level entry point for the prot2exon toolkit.
+#
+#   prot2exon plot ...     -> python plotter (python/prot2exon/plot.py)
+#   prot2exon <other>...   -> the C++ binary that does the mapping
+#
+# The C++ binary is discovered in this order:
+#   1. $PROT2EXON_BIN  (explicit override)
+#   2. <repo>/build/prot2exon (development build, where CMake places it)
+#   3. PATH lookup for `prot2exon-core` (installed sibling)
+#
+set -euo pipefail
+
+here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+repo_root="$(cd "$here/.." && pwd)"
+
+if [[ "${1:-}" == "plot" ]]; then
+    shift
+    export PYTHONPATH="$repo_root/python${PYTHONPATH:+:$PYTHONPATH}"
+    exec python3 -m prot2exon.plot "$@"
+fi
+
+binary="${PROT2EXON_BIN:-}"
+if [[ -z "$binary" ]]; then
+    if [[ -x "$repo_root/build/prot2exon" ]]; then
+        binary="$repo_root/build/prot2exon"
+    elif command -v prot2exon-core >/dev/null 2>&1; then
+        binary="$(command -v prot2exon-core)"
+    else
+        echo "error: could not locate the prot2exon C++ binary. Build it with:" >&2
+        echo "  cd \"$repo_root\" && mkdir -p build && cd build && cmake .. && make -j" >&2
+        echo "or set PROT2EXON_BIN to its path." >&2
+        exit 127
+    fi
+fi
+exec "$binary" "$@"

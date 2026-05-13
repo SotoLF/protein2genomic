@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Benchmark protein2genomic at increasing query scales.
+"""Benchmark prot2exon at increasing query scales.
 
 Measures wall-clock time and peak RSS for --output {all,isoform} at
 N = 100, 1k, 10k, 100k random domain queries against the prebuilt
@@ -22,9 +22,9 @@ import time
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent
-BIN = ROOT.parent / "build" / "protein2genomic"
-GTF = Path("/data1/peerd/sotougl/protein2genomic_work/gencode.v49.primary_assembly.annotation.gtf")
-IDX = Path("/data1/peerd/sotougl/protein2genomic_work/human.idx")
+BIN = ROOT.parent / "build" / "prot2exon"
+GTF = Path("/data1/peerd/sotougl/prot2exon_work/gencode.v49.primary_assembly.annotation.gtf")
+IDX = Path("/data1/peerd/sotougl/prot2exon_work/human.idx")
 PROTEINS_LIST = ROOT / "proteins_list.txt"
 WORK = ROOT / "work"
 RESULTS_TSV = ROOT / "results.tsv"

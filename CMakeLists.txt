@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.16)
-project(protein2genomic VERSION 1.0.0 LANGUAGES CXX)
+project(prot2exon VERSION 1.0.0 LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -27,17 +27,17 @@ set(SOURCES
 )
 
 # Create executable
-add_executable(protein2genomic src/main.cpp ${SOURCES})
+add_executable(prot2exon src/main.cpp ${SOURCES})
 
 # Link libraries
-target_link_libraries(protein2genomic Threads::Threads)
+target_link_libraries(prot2exon Threads::Threads)
 
 # Optional: Enable OpenMP for parallel processing
 find_package(OpenMP)
 if(OpenMP_CXX_FOUND)
-    target_link_libraries(protein2genomic OpenMP::OpenMP_CXX)
-    target_compile_definitions(protein2genomic PRIVATE USE_OPENMP)
+    target_link_libraries(prot2exon OpenMP::OpenMP_CXX)
+    target_compile_definitions(prot2exon PRIVATE USE_OPENMP)
 endif()
 
 # Install
-install(TARGETS protein2genomic DESTINATION bin)
+install(TARGETS prot2exon DESTINATION bin)
